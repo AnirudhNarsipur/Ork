@@ -1,31 +1,40 @@
-from ork import register,Workflow
+from ork import Workflow,TaskContext,WorkflowClient
 import logging
 import sys
+import time 
 def main():
     print("Hello from ork!")
 
 
-# @register
-def t1():
+def t1(tctx : TaskContext ):
     print("hello from t1")
 
-# @register
-def t2():
+# @register("t2")
+def t2(tctx : TaskContext):
     print("hello from t2")
 
-def t3():
+# @register("t3")
+def t3(tctx : TaskContext):
     print("hello from t3")
 
-def t4():
+# @register("t4")
+def t4(tctx : TaskContext):
+    wf = WorkflowClient(tctx)
     print("hello from t4")
+    wf.add_task(t5)
+
+def t5(tctx : TaskContext):
+    print("hello from t5")
 
 def main_test():
-    wf = Workflow()
+    wf = Workflow.create_server()
+   
     task1 = wf.add_task(t1)
     task2 = wf.add_task(t2,depends_on=[task1])
     task3 = wf.add_task(t3)
     task4 = wf.add_task(t4,depends_on=[task1,task2])
-    wf.execute()
+    wf.start()
+
 
 
 def setup_logger():
@@ -35,8 +44,8 @@ def setup_logger():
         "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    handler.setLevel(logging.INFO)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 if __name__ == "__main__":
-
-    main_test()
+   main_test()
