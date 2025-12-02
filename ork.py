@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Literal, Optional
 from multiprocessing import Process,Manager
@@ -6,6 +7,7 @@ from multiprocessing import Queue as MPQueue
 import logging
 from queue import Empty
 from abc import ABC
+from enum import Enum
 import functools
 logger = logging.getLogger(__name__)
 
@@ -20,16 +22,15 @@ class NONE(Quant):
 
 @dataclass()
 class One(Quant):
-    tasks : set[str]
+    tasks : list[Callable | int]
 
-@dataclass 
+@dataclass()
 class Some(Quant):
-    tasks : set[str]
+    tasks : list[Callable | int]
 
-@dataclass
+@dataclass()
 class FS(Quant): 
-    tasks : set[str] # Just a finite set
-
+    tasks : list[Callable | int] # Just a finite set
 
 @dataclass
 class All(Quant):
@@ -37,8 +38,8 @@ class All(Quant):
     
 
 class OrkPromise(ABC):
-    applies : FS | All
-    quant : Quant
+    from_nodes : FS | All
+    to_nodes : NONE | One | Some 
     
 # Constraints End
 # Utils Classes
@@ -58,10 +59,16 @@ class OrkTask:
     task_process : Optional[Process] = None # Set when task is running
 
 @dataclass()
-class TaskContext:
+class ClientContext:
     to_server : MPQueue
     from_server : MPQueue
-    task_id : Optional[int] = None 
+@dataclass()
+class TaskContext(ClientContext):   
+    task_id : int 
+@dataclass(eq=  True,frozen=True)
+class TypedTask:
+    name : str # The __qualname__ of the function
+    task_id : int
 # Util classes end
 
 def get_opt(q:MPQueue):
@@ -81,6 +88,113 @@ def worker_function(init_task_context : TaskContext, result_dict : dict,fn):
     result = fn(init_task_context)
     result_dict[init_task_context.task_id] = result 
     return result    
+
+def applicable(rule_applies : FS | All, typed_task : TypedTask  ) -> bool:
+    match rule_applies:
+        case All():
+            return True # All rules apply always
+        case FS(tasks=rule_task_list):
+            for rule_task in rule_task_list:
+                match rule_task:
+                    case int(task_id):
+                        if typed_task.task_id == task_id:
+                            return True
+                    case Callable():
+                        if typed_task.name == rule_task.__qualname__:
+                            return True
+    return False
+            
+
+class ConstraintChecker:
+
+    def __init__(self) -> None:
+        # Forward graph
+        self.current_edges : dict[int,tuple[str,list[TypedTask]]] = {} # Map from resource to list of task ids using it
+        # Store all constraints together
+        self.constraints : list[OrkPromise] = []
+
+
+    def _check_constraint(self,id_filter  : Optional[int] = None,constraint_filter : Optional[int] = None) -> bool:
+        # Get relevant tasks 
+        task_ids = [id_filter] if id_filter is not None else self.current_edges.keys()
+        # Get relevant constraints
+        constraints = [self.constraints[constraint_filter]] if constraint_filter is not None else self.constraints
+        for task_id in task_ids:
+            task_name,dep_tasks = self.current_edges[task_id]
+            for constraint in constraints:
+                if not applicable(constraint.from_nodes,TypedTask(task_name,task_id)):
+                    continue
+                # Now check the constraint
+                match constraint.to_nodes:
+                    case NONE():
+                        if len(dep_tasks) != 0:
+                            return False
+                    case One(tasks=task_list):
+                        # Only allowed to create one from the list 
+                        # Count how many from the list are in dep_tasks
+                        count = 0 
+                        for tsk in task_list:
+                            match tsk:
+                                case Callable():
+                                    if tsk.__qualname__ in [t.name for t in dep_tasks]:
+                                        count += 1
+                                case int(task_id):
+                                    if task_id in [t.task_id for t in dep_tasks]:
+                                        count += 1
+                        if count != 1:
+                            return False
+                    case Some(tasks=task_list):
+                        # Only allowed to create one from the list 
+                        # Count how many from the list are in dep_tasks
+                        atleastone = False
+                        for tsk in task_list:
+                            match tsk:
+                                case Callable():
+                                    if tsk.__qualname__ in [t.name for t in dep_tasks]:
+                                        atleastone = True
+                                        break
+                                case int(task_id):
+                                    if task_id in [t.task_id for t in dep_tasks]:
+                                        atleastone = True
+                                        break
+                        if not atleastone:
+                            return False
+                    case _:
+                        raise ValueError(f"Unexpected quantifier {constraint.create}")
+        return True
+
+
+    
+    def add_deps(self,n1 : TypedTask,n2 : list[TypedTask]) -> bool: # False if dependency causes a violation
+        for n2_task in n2:
+            if n2_task.task_id not in self.current_edges:
+                self.current_edges[n2_task.task_id] = (n2_task.name,[])
+            self.current_edges[n2_task.task_id][1].append(n1)
+            good = self._check_constraint(id_filter=n2_task.task_id) # Check for n2
+            if not good:
+                return False
+        return True 
+    def add_constraint(self,constraint : OrkPromise) -> bool: 
+        match constraint.from_nodes:
+            case All():
+                self.constraints.append(constraint)
+                if not self._check_constraint(constraint_filter=len(self.constraints)-1):
+                    return False
+            case FS(tasks=task_list):
+                self.constraints.append(constraint)
+                if not self._check_constraint(constraint_filter=len(self.constraints)-1):
+                    return False
+        return True
+    
+    def promise_kept(self,task_id : int) -> bool: # Did this task keep all its promises
+        #Get typed task
+        return self._check_constraint(id_filter=task_id)
+
+        
+class ExecStatus(Enum):
+    CONTINUE = 1
+    SHUTDOWN = 2
+    CLEAN_EXIT = 3
         
 
 class Workflow:
@@ -92,14 +206,15 @@ class Workflow:
         self.manager = Manager()
         self.result_dict = self.manager.dict()
         self.task_graph : dict[int,OrkTask] = {}
-        self.contexts : list[TaskContext ] = []
+        self.contexts : list[ClientContext] = []
         self.next_node_number = 1 # 1 - indexed
         self._start = False
         self.wait_qs : list[MPQueue] = []
+        self.constraint_checker = ConstraintChecker()
 
     @classmethod
     def create_server(cls) -> WorkflowClient:
-        init_task_context = TaskContext(MPQueue(),MPQueue())
+        init_task_context = ClientContext(MPQueue(),MPQueue())
         server_process = Process(target=start_server,args=(init_task_context,))
         server_process.start()
         print("server pid",server_process.pid)
@@ -112,11 +227,10 @@ class Workflow:
         logger.info(f"Starting task {task_id}")
         task_obj = self.task_graph[task_id]
         #Setup q
-        task_context = TaskContext(MPQueue(),MPQueue())
+        task_context = TaskContext(MPQueue(),MPQueue(),task_id)
         self.contexts.append(task_context)
         task_obj.task_context_id = len(self.contexts) - 1
         #Setup process
-        task_context.task_id = task_obj.task_id
         task_obj.task_process = Process(target=worker_function,args=(task_context,self.result_dict,task_obj.task_func,))
         task_obj.task_process.start()
 
@@ -144,6 +258,8 @@ class Workflow:
                 if self.task_graph[cond_task_id].status == 'failed':
                     return True # Conditional failed
                 # If the conditional is false we don't need this edge
+                if self.task_graph[cond_task_id].status != 'completed':
+                    continue
                 result = self.result_dict[cond_task_id]
                 assert isinstance(result,bool) , f"Expected result for {cond_task_id} to be a bool"
                 if not result: # If the conditional is false we don't care about the status of the dep
@@ -155,7 +271,7 @@ class Workflow:
         return False 
 
 
-    def _execute(self) -> bool:
+    def _execute(self) -> ExecStatus:
         """
         Blocks until no pending tasks remaing in workflow
         Returns:
@@ -165,7 +281,7 @@ class Workflow:
         running_task_ids = [k for k in self.task_graph if self.task_graph[k].status == 'running']
         alive =  len(pending_task_ids) != 0  or len(running_task_ids) != 0 
         if not alive:
-            return False
+            return ExecStatus.CLEAN_EXIT
         # Update all running tasks that have completed
         for running_task_id in running_task_ids:
             task_obj = self.task_graph[running_task_id]
@@ -174,11 +290,15 @@ class Workflow:
             if  proc_handle.is_alive():
                 continue # If process is alive then continue
             new_status = 'completed' if proc_handle.exitcode == 0 else 'failed'
-
+    
             proc_handle.join()
             proc_handle.close()
             self.task_graph
             task_obj.status = new_status
+            task_obj.task_process = None # Unset the process handle
+            if not self.constraint_checker.promise_kept(running_task_id):
+                print(f"Task {running_task_id} violated its promises, shutting down")
+                return ExecStatus.SHUTDOWN
         # Schedule all pending tasks that can run
         for pending_task_id in pending_task_ids:
             pending_task_obj = self.task_graph[pending_task_id]
@@ -194,7 +314,25 @@ class Workflow:
         pending_task_ids = [k for k in self.task_graph if self.task_graph[k].status == 'pending']
         running_task_ids = [k for k in self.task_graph if self.task_graph[k].status == 'running']
         alive =  len(pending_task_ids) != 0  or len(running_task_ids) != 0
-        return alive 
+        return ExecStatus.CONTINUE if alive else ExecStatus.CLEAN_EXIT
+    
+    def _shutdown(self,clean : bool = False):
+        self._start = False
+        # Clean up all processes
+        for task_id in self.task_graph:
+            task_obj = self.task_graph[task_id]
+            if task_obj.task_process is not None:
+                task_obj.task_process.terminate()
+                task_obj.task_process.join()
+                task_obj.task_process.close()
+
+        # Unblock all waiting clients
+        for wait_q in self.wait_qs:
+            wait_q.put(clean) # Bad Exit
+        # Close all client connections 
+        for context in self.contexts:
+            context.to_server.close()
+            context.from_server.close()
        
     def _add_task(self,func: Callable,depends_on : Optional[set[FromEdge]] = None ) -> int:
         if depends_on is None:
@@ -206,13 +344,18 @@ class Workflow:
             raise ValueError(f"Missing ids {missing_ids}")
             
         #Create task object
+        typed_deps  = [TypedTask(self.task_graph[dep.from_node].task_func.__qualname__,dep.from_node) for dep in depends_on]
+        if not self.constraint_checker.add_deps(TypedTask(func.__qualname__,self.next_node_number),typed_deps):
+            return -1 # Dependency addition failed due to constraint violation
         task_obj = OrkTask(self.next_node_number,func,'creating',depends_on)
         self.task_graph[self.next_node_number] = task_obj
         self.next_node_number += 1 
         return task_obj.task_id
+    
+    def _add_promise(self,promise : OrkPromise):
+        pass 
 
-
-    def _read_messages(self):
+    def _read_messages(self) -> bool:
         for context in self.contexts:
             while (msg := get_opt(context.to_server)) is not None:
                 msg_action,args = msg
@@ -220,6 +363,8 @@ class Workflow:
                     case "add_task":
                         func,depends_on = args
                         res_task_id = self._add_task(func,depends_on)
+                        if res_task_id == -1:
+                            return False 
                         #TODO: This could block but assume that the queue always has space
                         context.from_server.put(res_task_id)
                     case 'commit_task':
@@ -232,6 +377,13 @@ class Workflow:
                     case "join":
                         # Block until all tasks complete
                         self.wait_qs.append(context.from_server)
+                    case "add_promise":
+                        promise, = args
+                        if not self._add_promise(promise):
+                            print("Constraint violation detected when adding promise, shutting down")
+                            return False
+                        context.from_server.put(None)
+        return True
                         
                         
     
@@ -239,32 +391,48 @@ class Workflow:
         """
         Blocks
         """
-        alive = True
         print("Running server")
-        while alive:
-            self._read_messages()
-            if self._start:
-                alive = self._execute()
-        for wait_q in self.wait_qs:
-            wait_q.put(None)
-        self.wait_qs = []
+        exec_status = ExecStatus.CLEAN_EXIT
+        while True:
+            if not self._read_messages():
+                break
+            if not self._start:
+                continue
+            match exec_status := self._execute():
+                case ExecStatus.CONTINUE:
+                    continue
+                case ExecStatus.CLEAN_EXIT:
+                    break
+                case ExecStatus.SHUTDOWN:
+                    print("Constraint violation detected during execution, shutting down")
+                    break
+                
+        self._shutdown(exec_status == ExecStatus.CLEAN_EXIT)
         return None
 
 
-
 class WorkflowClient:
-    def __init__(self, task_context:TaskContext):
+    def __init__(self, task_context:ClientContext):
         self.task_context = task_context
         self.to_commit : list[int] = []
 
     
     def send_message(self,inp : tuple ):
         self.task_context.to_server.put(inp)
+
     def recv_message(self):
         return self.task_context.from_server.get()
 
 
     def add_task(self,func: Callable,depends_on : Optional[list[FromEdge]] = None) -> int:
+        """
+        Args:
+            func: The function to run as a task
+            depends_on: A list of FromEdge objects representing dependencies. If a dependency has a conditional task associated with it, the edge will only be considered if the conditional task returns True.
+        A task is "created" but not schedelued until commit() is called by the client.
+        Returns:
+            The task id of the created task
+        """
         self.send_message(("add_task",(func,set(depends_on) if depends_on else None)))
         res_task_id = self.recv_message()
         self.to_commit.append(res_task_id)
@@ -284,3 +452,6 @@ class WorkflowClient:
         self.task_context.to_server.put_nowait(("join",()))
         _ = self.task_context.from_server.get()
         
+    def add_promise(self,promise : OrkPromise):
+        self.task_context.to_server.put_nowait(("add_promise",(promise,)))
+        _ = self.task_context.from_server.get()

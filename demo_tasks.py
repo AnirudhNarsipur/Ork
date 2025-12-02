@@ -1,26 +1,33 @@
+import time
 import ork 
 
-# @ork.register
 def t1(tctx: ork.TaskContext):
     print("hello from t1")
 
-# @ork.register
 def t2(tctx: ork.TaskContext):
     print("hello from t2")
 
-# @ork.register
 def t3(tctx: ork.TaskContext):
     print("hello from t3")
 
-# @ork.register
+def cond_task(tctx: ork.TaskContext):
+    print("hello from cond_task")
+    return False
+
+def t5_dep(tctx: ork.TaskContext):
+    print("hello from t5_dep")
+    time.sleep(1)
+
 def t4(tctx: ork.TaskContext):
     wf = ork.WorkflowClient(tctx)
     print("hello from t4")
-    wf.add_task(t5)
+    t5_dep_task = wf.add_task(t5_dep)
+    cond_task_id = wf.add_task(cond_task)
+    wf.add_task(t5,depends_on=[ork.FromEdge(t5_dep_task,cond_task_id)])    
     wf.commit()
+    return False
 
 
-# @ork.register
 def t5(tctx: ork.TaskContext):
     print("hello from t5")
     wf = ork.WorkflowClient(tctx)
