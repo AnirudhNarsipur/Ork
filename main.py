@@ -16,4 +16,4 @@ def setup_logger():
 
 
 if __name__ == "__main__":
-    demo_tasks.main_test()
+    demo_tasks.main()
