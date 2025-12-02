@@ -1,7 +1,9 @@
 from ork import Workflow,TaskContext,WorkflowClient
+# from constraints import OrkConstraintApp
+import constraints as orkcnstr
 import logging
 import sys
-import time 
+# import flytekit as fl
 def main():
     print("Hello from ork!")
 
@@ -25,9 +27,11 @@ def t4(tctx : TaskContext):
 
 def t5(tctx : TaskContext):
     print("hello from t5")
+    # wf = WorkflowClient(tctx)
+    # wf.add_constraint(OrkConstraintApp(1,orkcnstr.Atom(1,2)))
 
 def main_test():
-    wf = Workflow.create_server()
+    wf : WorkflowClient = Workflow.create_server()
    
     task1 = wf.add_task(t1)
     task2 = wf.add_task(t2,depends_on=[task1])

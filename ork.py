@@ -1,25 +1,59 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional
-from multiprocessing import Process
+from typing import Any, Callable, Literal, Optional, Union
+from multiprocessing import Process,Manager
 from multiprocessing import Queue as MPQueue
 import logging
 from queue import Empty
+from enum import Enum 
 logger = logging.getLogger(__name__)
-# _TASK_REGISTRY : dict[str,Callable] = {}
-# def register(name : str):
-#     if name in _TASK_REGISTRY:
-#         raise ValueError(f"{name} is already registred for function {_TASK_REGISTRY[name].__name__}")
-#     def wrapper(func):
-#         func._ork_registred_name = name
-#         _TASK_REGISTRY[name] = func 
-#         def fn_args(*args,**kwargs):
-#             print("Running ", func.__name__)
-#             result = func(*args, **kwargs)
-#             print("Finished running ", func.__name__)
-#             return result
-#         return fn_args
-#     return wrapper
+
+# Constraints 
+AnyTask : int  = -1 # A sentinel value 
+
+@dataclass()
+class OrkAtom:
+    from_node : int # A edge starting from a node with this number
+    to_node : int # A edge ending in this node 
+    when : Optional[int] = None # If passed then when task with id N returns True 
+    
+
+@dataclass()
+class Or:
+    args : list[OrkAtom]
+
+@dataclass()
+class And:
+    args : list[OrkAtom]
+
+@dataclass()
+class Neg:
+    arg : OrkAtom
+
+OrkConstraint = Union[OrkAtom | Or | And | Neg]
+# Constraints End
+# Utils Classes
+@dataclass()
+class FromEdge:
+    from_node : int 
+    cond : Optional[int] = None 
+    
+
+@dataclass()
+class OrkTask:
+    task_id : int
+    task_func :Callable
+    status : Literal['pending','running','completed','failed']
+    depends_on : list[FromEdge]
+    task_context_id : Optional[int] = None # Set when task is running
+    task_process : Optional[Process] = None # Set when task is running
+
+@dataclass()
+class TaskContext:
+    to_server : MPQueue
+    from_server : MPQueue
+# Util classes end
+
 def get_opt(q:MPQueue):
     try:
         res = q.get_nowait()
@@ -28,34 +62,28 @@ def get_opt(q:MPQueue):
         return None 
 
 
-@dataclass()
-class OrkTask:
-    task_id : int
-    task_func :Callable
-    status : Literal['pending','running','completed','failed']
-    depends_on:  list[int]
-    task_context_id : Optional[int] = None # Set when task is running
-
-@dataclass()
-class TaskContext:
-    to_server : MPQueue
-    from_server : MPQueue
-
 def start_server(init_task_context : TaskContext):
     wf = Workflow()
     wf._register_context(init_task_context)
     wf.start_server()
+
+
+def worker_function(task_num : int , result_dict : dict,func,init_task_context):
+    result = func(init_task_context)
+    result_dict[task_num] = result 
+
 
 class Workflow:
     """
     Not exposed
     """
     def __init__(self):
-        # Node -> list of dependent nodes
+        # Task Node Objects
+        self.manager = Manager()
+        self.result_dict = self.manager.dict()
         self.task_graph : dict[int,OrkTask] = {}
-        self.task_handles : dict[int,Process] = {}
-        self.next_node_number = 1 # 1 - indexed
         self.contexts : list[TaskContext ] = []
+        self.next_node_number = 1 # 1 - indexed
         self._start = False
 
     @classmethod
@@ -69,8 +97,6 @@ class Workflow:
     def _register_context(self,nq : TaskContext):
         self.contexts.append(nq)
 
-
-
     def _schedule_task(self,task_id : int):
         logger.info(f"Starting task {task_id}")
         task_obj = self.task_graph[task_id]
@@ -79,30 +105,41 @@ class Workflow:
         self.contexts.append(task_context)
         task_obj.task_context_id = len(self.contexts) - 1
         #Setup process
-        self.task_handles[task_obj.task_id] = Process(target=task_obj.task_func,args=(task_context,))
-        proc_handle = self.task_handles[task_obj.task_id]
-        proc_handle.start()
-       
-        
+        task_obj.task_process = Process(target=worker_function,args=(task_obj.task_id,self.result_dict,task_obj.task_func,task_context,))
+        task_obj.task_process.start()
 
-    def _add_task(self,func: Callable,depends_on : Optional[list[int]] = None) -> int:
-        if depends_on is None:
-            depends_on = []
-        # Check that all dependent tasks exists
-        existing_ids = set(self.task_graph.keys())
-        given_ids = set(depends_on)
-        if len(missing_ids := (given_ids - existing_ids)) != 0:
-            raise ValueError(f"Missing ids {missing_ids}")
-            
-        #Create task object
-        task_obj = OrkTask(self.next_node_number,func,'pending',list(depends_on))
+    def _all_deps_complete(self,task_id : int) -> bool:
+        for from_edge in self.task_graph[task_id].depends_on:
+            # By default enforce the dependency
+            enforce_dep = True 
+            # If there is a condition first check that the conditional task has completed
+            if (cond_task_res_id := from_edge.cond) is not None:
+                if self.task_graph[cond_task_res_id].status != 'completed':
+                    return False 
+                # If the result of the task is False then don't enforce the dependency
+                cond_task_res = self.result_dict[cond_task_res_id]
+                assert isinstance(cond_task_res,bool) , f"Expected {cond_task_res_id} to have a boolean result"
+                # Only enforce if cond_task_res is True 
+                enforce_dep =  cond_task_res 
+           
+            if not enforce_dep:
+                continue
 
-        self.task_graph[self.next_node_number] = task_obj
-        self.next_node_number += 1 
-        return task_obj.task_id
-    
+            # Now check if the dependent task has completed
+            if self.task_graph[from_edge.from_node].status != 'completed':
+                return False 
+        return True 
 
-    
+                 
+    def _any_deps_fail(self,task_id : int ) -> bool:
+        for from_edge in self.task_graph[task_id].depends_on:
+            # If there is a condition first check that the conditional task has completed
+            if (cond_task_res_id := from_edge.cond) is not None and self.task_graph[cond_task_res_id].status == 'failed':
+                    return True  
+            if self.task_graph[from_edge.from_node].status == 'failed':
+                return True  
+        return False
+
     def _execute(self) -> bool:
         """
         Blocks until no pending tasks remaing in workflow
@@ -116,18 +153,22 @@ class Workflow:
             return False
         # Update all running tasks that have completed
         for running_task_id in running_task_ids:
-            proc_handle  = self.task_handles[running_task_id]
+            task_obj = self.task_graph[running_task_id]
+            proc_handle  = task_obj.task_process
+            assert isinstance(proc_handle,Process) , f"Expected a process for running task {running_task_id}"
             if  proc_handle.is_alive():
                 continue # If process is alive then continue
             new_status = 'completed' if proc_handle.exitcode == 0 else 'failed'
+
+            proc_handle.join()
             proc_handle.close()
-            del self.task_handles[running_task_id]
-            self.task_graph[running_task_id].status = new_status
+            self.task_graph
+            task_obj.status = new_status
         # Schedule all pending tasks that can run
         for pending_task_id in pending_task_ids:
             pending_task_obj = self.task_graph[pending_task_id]
-            all_complete = all([ self.task_graph[dep_id].status == 'completed'  for dep_id in pending_task_obj.depends_on ])
-            failed_deps = [ dep_id   for dep_id in pending_task_obj.depends_on if self.task_graph[dep_id].status == 'failed']
+            all_complete = self._all_deps_complete(pending_task_id)
+            failed_deps = self._any_deps_fail(pending_task_id)
             if all_complete:
                 self._schedule_task(pending_task_id)
                 pending_task_obj.status = 'running'
@@ -139,7 +180,35 @@ class Workflow:
         running_task_ids = [k for k in self.task_graph if self.task_graph[k].status == 'running']
         alive =  len(pending_task_ids) != 0  or len(running_task_ids) != 0
         return alive 
+       
+        
+
+    def _add_task(self,func: Callable,depends_on : Optional[list[int]] = None) -> int:
+        if depends_on is None:
+            depends_on = []
+        # Check that all dependent tasks exists
+        existing_ids = set(self.task_graph.keys())
+        given_ids = set(depends_on)
+        if len(missing_ids := (given_ids - existing_ids)) != 0:
+            raise ValueError(f"Missing ids {missing_ids}")
+            
+        #Create task object
+        from_edges = [FromEdge(dep_id,None) for dep_id in depends_on]
+        task_obj = OrkTask(self.next_node_number,func,'pending',from_edges)
+        self.task_graph[self.next_node_number] = task_obj
+        self.next_node_number += 1 
+        return task_obj.task_id
     
+
+    
+
+    
+    # def _check_constraint(self,check_constraint : OrkConstraintApp):
+    #     pass 
+    
+    # def _add_constraint(self,constraint: OrkConstraintApp):
+    #     pass
+
 
 
     def _read_messages(self):
@@ -182,3 +251,6 @@ class WorkflowClient:
     
     def start(self):
         self.task_context.to_server.put_nowait(("start",()))
+
+    # def add_constraint(self,constraint : OrkConstraintApp):
+    #     self.task_context.to_server.put_nowait(("add_constraint",(constraint,)))
