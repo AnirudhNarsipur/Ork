@@ -4,12 +4,12 @@ from datetime import datetime
 import os 
 CWD = os.getcwd()
 def t1(tctx: ork.TaskContext):
-    print("hello from t1")
     time.sleep(0.5) # Simulate some work being done
+    print("hello from t1")
 
-def t2(tctx: ork.TaskContext):
-    print("hello from t2")
+def t2(tctx: ork.TaskContext):  
     time.sleep(10) # Simulate some work being done
+    print("hello from t2")
 
 def t3(tctx: ork.TaskContext):
     print("hello from t3")
