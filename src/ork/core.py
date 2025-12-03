@@ -35,7 +35,7 @@ class OrkTask:
     task_id: int
     task_func: Callable
     status: OrkTaskStatus
-    depends_on: set[FromEdge]
+    depends_on: list[FromEdge]
     parent_id: Optional[int] = None  # None only for the root task
     task_context_id: Optional[int] = None  # Set when task is running
     task_process: Optional[Process] = None  # Set when task is running
@@ -75,8 +75,8 @@ def start_server(init_task_context: TaskContext):
     wf.start_server()
 
 
-def worker_function(init_task_context: TaskContext, result_dict: dict, fn):
-    result = fn(init_task_context)
+def worker_function(init_task_context: TaskContext, result_dict: dict, fn,args_dict):
+    result = fn(init_task_context,args_dict)
     result_dict[init_task_context.task_id] = result
     return result
 
@@ -261,7 +261,7 @@ class Workflow:
         self.result_dict = self.manager.dict()
         self.task_graph: dict[int, OrkTask] = {}
         self.contexts: list[ClientContext] = []
-        self.next_node_number = 1  # 1 - indexed
+        self.next_node_number = 0  # 0 - indexed
         self._start = False
         self.wait_qs: list[MPQueue] = []
         self.constraint_checker = ConstraintChecker()
@@ -288,12 +288,21 @@ class Workflow:
         self.contexts.append(task_context)
         task_obj.task_context_id = len(self.contexts) - 1
         # Setup process
+        args_dict = {}
+        for idx,dep_edge in enumerate(task_obj.depends_on):
+            # If the edge has a condition and the condition is false we skip setting the arg
+            if (cond_task_id := dep_edge.cond) is not None and not self.result_dict[cond_task_id]:
+                continue
+            assert dep_edge.from_node in self.result_dict, f"Dependency {dep_edge.from_node} result not found for task {task_id}"
+            args_dict[idx] = self.result_dict[dep_edge.from_node]
+    
         task_obj.task_process = Process(
             target=worker_function,
             args=(
                 task_context,
                 self.result_dict,
                 task_obj.task_func,
+                args_dict
             ),
         )
         task_obj.task_process.start()
@@ -415,11 +424,11 @@ class Workflow:
     def _add_task(
         self,
         func: Callable,
-        depends_on: Optional[set[FromEdge]] = None,
+        depends_on: Optional[list[FromEdge]] = None,
         spawn_id: Optional[int] = None,
     ) -> int:
         if depends_on is None:
-            depends_on = set()
+            depends_on = []
         # Check that all dependent tasks exists
         existing_ids = set(self.task_graph.keys())
         given_ids = {dep.from_node for dep in depends_on}
@@ -539,7 +548,7 @@ class WorkflowClient:
         if isinstance(self.task_context, TaskContext):
             spawn_id = self.task_context.task_id
         self.send_message(
-            ("add_task", (func, set(depends_on) if depends_on else None, spawn_id))
+            ("add_task", (func, depends_on if depends_on else None, spawn_id))
         )
         res_task_id = self.recv_message()
         self.to_commit.append(res_task_id)

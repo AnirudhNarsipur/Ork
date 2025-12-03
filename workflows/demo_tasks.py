@@ -4,19 +4,19 @@ from datetime import datetime
 import os 
 
 CWD = os.getcwd()
-def t1(tctx: ork.TaskContext):
+def t1(tctx: ork.TaskContext,args):
     time.sleep(0.5) # Simulate some work being done
     print("hello from t1")
 
-def t2(tctx: ork.TaskContext):  
+def t2(tctx: ork.TaskContext,args):  
     time.sleep(10) # Simulate some work being done
     print("hello from t2")
 
-def t3(tctx: ork.TaskContext):
+def t3(tctx: ork.TaskContext,args):
     print("hello from t3")
     return False # As false t4 will not wait for t2 to complete
 
-def t4(tctx: ork.TaskContext):
+def t4(tctx: ork.TaskContext,args):
     wf = ork.WorkflowClient(tctx) # Create a workflow client from the task context
     print("hello from t4")
     wf.add_task(t5,depends_on=[ork.FromEdge(tctx.task_id)]) # Dynamically add a task t5 depending on t4. Will run after t4 completes
@@ -24,16 +24,16 @@ def t4(tctx: ork.TaskContext):
         wf.add_task(fire_forget) # Dynamically spawn a fire-and-forget task that runs immediately once committed
     wf.commit()
     time.sleep(3) # Simulate some work being done
-    return False
+    return 10
 
-def fire_forget(tctx: ork.TaskContext):
+def fire_forget(tctx: ork.TaskContext,args):
     print("hello from fire_forget")
 
-def t5(tctx: ork.TaskContext):
-    print("hello from t5")
+def t5(tctx: ork.TaskContext,args):
+    print(f"hello from t5. Received value {args[0]} from t4")
     
 
-def root_task(tctx: ork.TaskContext):
+def root_task(tctx: ork.TaskContext,args):
     wf = ork.WorkflowClient(tctx) # Create a workflow client from the task context
 
     task1_id = wf.add_task(t1) # Add t1 as a task with no dependencies and returns a task id
