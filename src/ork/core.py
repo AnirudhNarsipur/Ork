@@ -1,7 +1,8 @@
 from __future__ import annotations
 from abc import ABC
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import json
 from typing import Any, Callable, Literal, Optional, Sequence
 from multiprocessing import Process, Manager
 from multiprocessing import Queue as MPQueue
@@ -12,7 +13,9 @@ from datetime import datetime
 import uuid
 from collections import deque
 
-from ork.event import Event, MessageEvent
+from pydantic import BaseModel
+
+from ork.event import ConditionedTask, CreateConditionEvent, CreateNodeEvent, CreatePromiseEvent, Event, FromEdgeModel, MarkStateTransition, MessageEvent
 from .promise import EdgePromise,NodePromise,ConstrainedPromise,All,ListTaskOrTaskType,COMPOPS
 from pathlib import Path
 logger = logging.getLogger(__name__)
@@ -57,12 +60,12 @@ class TypedTask:
     name: str  # The __qualname__ of the function
     task_id: int
 
-
+@dataclass(eq=True, frozen=True)
 class Cond(ABC):
     pass 
+@dataclass(eq=True, frozen=True)
 class CondAtom(Cond):
-    def __init__(self,inp: int | bool): # Either the result of a task with id inp or a boolean constant
-        self.inp = inp
+    inp : int | bool
 @dataclass(eq=True, frozen=True)
 class AndCond(Cond):
     args : list[Cond]
@@ -171,6 +174,8 @@ class ConstraintChecker:
             case ">":
                 return lhs > rhs
         raise ValueError(f"Unknown op {op}")
+
+
     
     def get_ids_from_tasklist(self,task_list : ListTaskOrTaskType | All) -> list[int]:
         match task_list:
@@ -284,6 +289,23 @@ class ExecStatus(Enum):
     SHUTDOWN = 2
     CLEAN_EXIT = 3
 
+
+
+def serialize_tasktype_id_ls(arg : ListTaskOrTaskType | All) -> list[str | int] | Literal["ALL"]:
+    match arg:
+        case All():
+            return "ALL"
+        case list() as ls:
+            res = []
+            for item in ls:
+                    if isinstance(item,Callable):
+                        res.append(item.__qualname__)
+                    elif isinstance(item,int):
+                        res.append(item)
+                    else:
+                        raise ValueError("Invalid item in task list")
+            return res
+
 def serialize_arg(arg):
     if isinstance(arg, Callable):
         return arg.__qualname__
@@ -297,12 +319,11 @@ def serialize_arg(arg):
         }
     elif isinstance(arg, EdgePromise) or isinstance(arg, NodePromise):
         return {
-            "from_nodes": [i if isinstance(i, int) else i.__qualname__ for i in (arg.from_nodes if isinstance(arg.from_nodes, list) else [])] if not isinstance(arg.from_nodes, All) else "ALL",
-            "to_nodes": [i if isinstance(i, int) else i.__qualname__ for i in (arg.to_nodes if isinstance(arg.to_nodes, list) else [])] if not isinstance(arg.to_nodes, All) else "ALL",
+            "from_nodes": serialize_tasktype_id_ls(arg.from_nodes),
+            "to_nodes": serialize_tasktype_id_ls(arg.to_nodes), # type: ignore
         }
     else:
         return str(arg)
-
 class Workflow:
     """
     Not exposed
@@ -332,6 +353,26 @@ class Workflow:
         server_process.start()
         print("server pid", server_process.pid)
         return WorkflowClient(init_task_context)
+    
+    def append_event(self,event : BaseModel):
+        self.event_log_file_handle.write(event.model_dump_json() + "\n")
+        self.event_log_file_handle.flush() # Flush to display immediately
+    
+    def transition_state(self,task_id : int, new_state : Literal["conditioned","pending","running","completed","failed"],error_msg : Optional[str]=None):
+        self.task_graph[task_id].status = new_state
+        result = None 
+        if new_state == "completed":
+            result = self.result_dict[task_id]
+        # Emit event
+        self.append_event(Event(
+            timestamp=datetime.now().timestamp(),
+            event=MarkStateTransition(
+                node_id=task_id,
+                new_state=new_state,
+                result=result,
+                error_msg=error_msg)))
+
+        
 
     def _register_context(self, nq: TaskContext):
         self.contexts.append(nq)
@@ -414,18 +455,15 @@ class Workflow:
                 if cond_result is None: # Can't evaluate yet
                     break 
                 if not cond_result: # Condition is false, mark this as failed and remove from list
-                    self.task_graph[task_id].status = "failed" 
+                    self.transition_state(task_id,"failed",error_msg="Condition evaluated to false")
                     case_group.popleft()
                 else: # Condition is true, mark this as pending and remove from list
-                    self.task_graph[task_id].status = "pending"
+                    self.transition_state(task_id,"pending")
                     evaluated = True 
                     break
             if case_group and not evaluated:
                 new_case_groups.append(case_group)
         self.cases = new_case_groups
-                    
-                
-                              
 
     def _execute(self) -> ExecStatus:
         """
@@ -452,12 +490,11 @@ class Workflow:
             if proc_handle.is_alive():
                 continue  # If process is alive then continue
             new_status = "completed" if proc_handle.exitcode == 0 else "failed"
-
             proc_handle.join()
             proc_handle.close()
-            self.task_graph
-            task_obj.status = new_status
             task_obj.task_process = None  # Unset the process handle
+            self.transition_state(running_task_id,new_status)
+            
         # Evaluate conditions for conditioned tasks
         self._update_conditioned_tasks()
         # Schedule all pending tasks that can run
@@ -528,11 +565,18 @@ class Workflow:
             TypedTask(func.__qualname__, self.next_node_number), typed_deps
         ):
             return -1  # Dependency addition failed due to constraint violation
-
         task_obj = OrkTask(
             self.next_node_number, func, "creating", depends_on, parent_id=spawn_id
         )
         self.task_graph[self.next_node_number] = task_obj
+  
+        self.append_event(Event(
+            timestamp=datetime.now().timestamp(),
+            event=CreateNodeEvent(
+                node_id=task_obj.task_id,
+                deps=[FromEdgeModel(from_node=dep.from_node, cond=dep.cond) for dep in depends_on],
+            ),
+        ))
         self.next_node_number += 1
         return task_obj.task_id
     
@@ -557,9 +601,24 @@ class Workflow:
             self.task_graph[task_id].conditioned = True
         
         self.cases.append(deque([(branch_cond,task_id) for task_id,(branch_cond,_,_) in zip(res_task_ids,cases)]))
+        self.append_event(Event(
+            timestamp=datetime.now().timestamp(),
+            event=CreateConditionEvent(
+                case_groups=[ConditionedTask(condition=asdict(branch_cond), task_id=task_id) for task_id,(branch_cond,_,_) in zip(res_task_ids,cases)])
+        ))
         return res_task_ids
 
     def _add_promise(self, promise: ConstrainedPromise):
+        self.append_event(Event(
+            timestamp=datetime.now().timestamp(),
+            event=CreatePromiseEvent(
+                constraint_type="EdgePromise"  if isinstance(promise.promise, EdgePromise) else "NodePromise", #TODO
+                from_nodes=serialize_tasktype_id_ls(promise.promise.from_nodes),
+                to_nodes=serialize_tasktype_id_ls(promise.promise.to_nodes), # type: ignore[arg-type]
+                constraint_op=promise.op,
+                constraint_n=promise.n,
+            ),
+        ))
         return self.constraint_checker.add_constraint(promise)
 
     def _read_messages(self) -> bool:
@@ -568,8 +627,7 @@ class Workflow:
 
                 msg_action, args = msg
                 message_event = Event(timestamp=datetime.now().timestamp(), event=MessageEvent(action=msg_action, args=[serialize_arg(a) for a in args]))
-                self.event_log_file_handle.write(message_event.model_dump_json() + "\n")
-                self.event_log_file_handle.flush() # Flush to display immediately
+                self.append_event(message_event)
                 match msg_action:
                     case "add_task":
                         func, depends_on, spawn_id = args
@@ -585,9 +643,9 @@ class Workflow:
                             )
                             #TODO: What if only some tasks in a case are committed?
                             if self.task_graph[task_id].conditioned:
-                                self.task_graph[task_id].status = "conditioned"
+                                self.transition_state(task_id,"conditioned")
                             else:
-                                 self.task_graph[task_id].status = "pending"
+                                 self.transition_state(task_id,"pending")
                                 
                             context.from_server.put(None)
                     case "start":

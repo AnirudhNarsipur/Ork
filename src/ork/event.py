@@ -1,25 +1,53 @@
-from pydantic import BaseModel
-from typing import Literal
+from pydantic import BaseModel, Json
+from typing import Any, Dict, Literal, Optional
+
+# Seperate models for event types
+# Why? 
+# - Useful to disinguish events from internal data structures
+# - Don't want internal data structures to depend on pydantic (expensive)
+# - Give a clear model for viz frontend
+class FromEdgeModel(BaseModel):
+    from_node : int 
+    cond : int  | None = None
 
 class MessageEvent(BaseModel):
+    event_type : Literal["message"] = "message"
     action : str 
     args : list 
 
-class FromEdge(BaseModel):
-    src_task_id : str 
-    cond_task_id : str | None = None
-
 class CreateNodeEvent(BaseModel):
-    node_id : str 
-    deps : list[FromEdge]
+    event_type : Literal["create_node"]     = "create_node"
+    node_id : int 
+    deps : list[FromEdgeModel]
+
+class MarkStateTransition(BaseModel):
+    event_type : Literal["mark_state_transition"] = "mark_state_transition"
+    node_id : int
+    new_state : Literal["conditioned","pending","running","completed","failed"]
+    result : Optional[Any] = None
+    error_msg : Optional[str] = None
 
 class CreatePromiseEvent(BaseModel):
-    edge_promise : str
-    expected_count : int
+    event_type : Literal["create_promise"] = "create_promise"
+    constraint_type : Literal["EdgePromise","NodePromise"]
+    from_nodes : list[str | int ] | Literal["ALL"]
+    to_nodes : list[str | int ] | Literal["ALL"]
+    constraint_op : Optional[Literal["==","<=","<",">=",">"]] = None
+    constraint_n : Optional[int] = None
+
+class ConditionedTask(BaseModel):
+    condition : Dict
+    task_id : str 
+    
+class CreateConditionEvent(BaseModel):
+    event_type : Literal["create_condition"] = "create_condition"
+    case_groups : list[ConditionedTask]
+
+#TODO: Add events for state transitions 
 
 class Event(BaseModel):
     timestamp : float 
-    event : MessageEvent
+    event : MessageEvent | CreateNodeEvent | MarkStateTransition | CreatePromiseEvent | CreateConditionEvent
 
 
     
