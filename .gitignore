@@ -11,3 +11,4 @@ wheels/
 .vscode/
 TODO.md
 *.jsonl
+wf_data/

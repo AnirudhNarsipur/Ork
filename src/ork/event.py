@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Json
+from pydantic import BaseModel
 from typing import Any, Dict, Literal, Optional
 
 # Seperate models for event types
@@ -18,6 +18,7 @@ class MessageEvent(BaseModel):
 class CreateNodeEvent(BaseModel):
     event_type : Literal["create_node"]     = "create_node"
     node_id : int 
+    name : str 
     deps : list[FromEdgeModel]
 
 class MarkStateTransition(BaseModel):

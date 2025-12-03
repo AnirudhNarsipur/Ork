@@ -339,20 +339,13 @@ class Workflow:
         self._start = False
         self.wait_qs: list[MPQueue] = []
         self.constraint_checker = ConstraintChecker()
-        event_log_path = Path("event_logs") / f"workflow_{self.workflow_id}_events.jsonl"
+        event_log_path = Path("event_logs") / f"{self.workflow_id}.jsonl"
         event_log_path.parent.mkdir(parents=True, exist_ok=True)
         event_log_path.unlink(missing_ok=True)  # Remove existing log file 
         self.event_log_file_handle = open(event_log_path,"a")
         self.cases : list[deque[tuple[Cond,int]]] = [] # List of cases for each conditional task id
 
 
-    @classmethod
-    def create_server(cls,workflow_id : Optional[str] = None ) -> WorkflowClient:
-        init_task_context = ClientContext(MPQueue(), MPQueue())
-        server_process = Process(target=start_server, args=(init_task_context,workflow_id))
-        server_process.start()
-        print("server pid", server_process.pid)
-        return WorkflowClient(init_task_context)
     
     def append_event(self,event : BaseModel):
         self.event_log_file_handle.write(event.model_dump_json() + "\n")
@@ -407,7 +400,7 @@ class Workflow:
     def _all_deps_complete(self, task_id: int) -> bool:
         for dep_edge in self.task_graph[task_id].depends_on:
             # Check if there is a conditional and it has resolved
-            if cond_task_id := dep_edge.cond:
+            if (cond_task_id := dep_edge.cond) is not None:
                 if not self.task_graph[cond_task_id].status == "completed":
                     return False  # Conditional has not resolved
                 # If the conditional is false we don't need this edge
@@ -564,6 +557,7 @@ class Workflow:
         if not self.constraint_checker.add_deps(None,
             TypedTask(func.__qualname__, self.next_node_number), typed_deps
         ):
+            print("ERROR: Dependency addition violated constraints. Shutting down")
             return -1  # Dependency addition failed due to constraint violation
         task_obj = OrkTask(
             self.next_node_number, func, "creating", depends_on, parent_id=spawn_id
@@ -574,6 +568,7 @@ class Workflow:
             timestamp=datetime.now().timestamp(),
             event=CreateNodeEvent(
                 node_id=task_obj.task_id,
+                name = func.__qualname__,
                 deps=[FromEdgeModel(from_node=dep.from_node, cond=dep.cond) for dep in depends_on],
             ),
         ))
@@ -679,6 +674,7 @@ class Workflow:
         exec_status = ExecStatus.CLEAN_EXIT
         while True:
             if not self._read_messages():
+                exec_status = ExecStatus.SHUTDOWN
                 break
             if not self._start:
                 continue
@@ -727,7 +723,7 @@ class WorkflowClient:
         )
         res_task_id = self.recv_message()
         self.to_commit.append(res_task_id)
-        print("Created task id", res_task_id)
+        # print("Created task id", res_task_id)
         return res_task_id
     
     def add_cases(self, cases: list[tuple[Cond,Callable, Optional[list[FromEdge]]]]) -> list[int]:
@@ -739,7 +735,7 @@ class WorkflowClient:
         )
         res_task_ids = self.recv_message()
         self.to_commit.extend(res_task_ids)
-        print("Created task ids", res_task_ids)
+        # print("Created task ids", res_task_ids)
         return res_task_ids
 
     def commit(self):
@@ -760,9 +756,15 @@ class WorkflowClient:
         self.task_context.to_server.put_nowait(("add_promise", (promise,)))
         _ = self.task_context.from_server.get()
 
+def create_server(workflow_id : Optional[str] = None ) -> WorkflowClient:
+        init_task_context = ClientContext(MPQueue(), MPQueue())
+        server_process = Process(target=start_server, args=(init_task_context,workflow_id))
+        server_process.start()
+        print("server pid", server_process.pid)
+        return WorkflowClient(init_task_context)
 
 def run(root_task: Callable, workflow_id: Optional[str] = None):
-    wf_client = Workflow.create_server(workflow_id=workflow_id)
+    wf_client = create_server(workflow_id=workflow_id)
     _ = wf_client.add_task(root_task)
     wf_client.commit()
     wf_client.start()
