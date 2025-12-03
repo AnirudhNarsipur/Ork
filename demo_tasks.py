@@ -41,7 +41,7 @@ def root_task(tctx: ork.TaskContext):
     # Add t4 depending on t1 and a conditional dependency on t2 . The t2 dependency is only enforced if t3 returns True
     wf.add_task(t4, depends_on=[ork.FromEdge(task1_id), ork.FromEdge(task2_id,task3_id)])
     # No outgoing edges for any instance of t5
-    wf.add_promise(ork.Promise(ork.FS([t5]),ork.NONE()) )
+    wf.add_promise(ork.EdgePromise([t5],ork.All()) == 0)
     wf.commit() # Commit created tasks - marking them as ready for execution. If not committed, tasks will not run.
     wf.start() # Start executing tasks in the workflow
     wf.wait() # Block until all tasks have completed

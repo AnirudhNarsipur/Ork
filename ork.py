@@ -172,7 +172,7 @@ class ConstraintChecker:
     def get_ids_from_tasklist(self,task_list : ListTaskOrTaskType | All) -> list[int]:
         match task_list:
             case All():
-                return list(self.current_edges.keys())
+                return list(set(list(self.current_edges.keys()) + list(self.spawn_map.keys())))
             case list(tl):
                 res = []
                 for task in tl:
@@ -250,9 +250,9 @@ class ConstraintChecker:
     ) -> bool:  # False if dependency causes a violation
         applicable_constraints = []
         self.spawn_map[spawn_task.task_id].add(n1.task_id)
-        applicable_constraints.extend(self._task_relevant_constraints(spawn_task.task_id))
         self.id_to_name[n1.task_id] = n1.name
         applicable_constraints.extend(self._task_relevant_constraints(n1.task_id))
+        applicable_constraints.extend(self._task_relevant_constraints(spawn_task.task_id))
         for n2_task in n2:
             self.id_to_name[n2_task.task_id] = n2_task.name
             self.current_edges[n2_task.task_id].add(n1.task_id)
