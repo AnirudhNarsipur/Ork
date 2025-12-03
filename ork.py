@@ -1,53 +1,70 @@
 from __future__ import annotations
+from collections import defaultdict
 from dataclasses import dataclass
 import json
-from typing import Callable, Literal, Optional
+from typing import Callable, Literal, Optional, Sequence
 from multiprocessing import Process, Manager
 from multiprocessing import Queue as MPQueue
 import logging
 from queue import Empty
 from abc import ABC
 from enum import Enum
+from typing import Final
 import uuid
 
 logger = logging.getLogger(__name__)
 
 
-# Constraints
-@dataclass()
-class Quant(ABC):
+ListTaskOrTaskType = list[Callable | int]
+ListTaskType = list[Callable]
+class All:
+      __slots__ = ()
+      def __repr__(self): return "ALL"
+
+class Promise(ABC):
     pass
+COMPOPS = Literal["==","<=","<",">=",">"]
+class ConstraintOpsMixin:
+      def _constraint(self, op: COMPOPS, value: int) -> ConstrainedPromise:
+          if not isinstance(value, int):
+              raise TypeError("Only integers are allowed for constraints")
+          return ConstrainedPromise(self, op, value) # type: ignore[arg-type]
 
+      def __eq__(self, value: object) -> ConstrainedPromise:  # type: ignore[override]
+          return self._constraint("==", value)  # type: ignore[arg-type]
 
-@dataclass()
-class NONE(Quant):
-    pass
+      def __le__(self, value: int) -> ConstrainedPromise:
+          return self._constraint("<=", value)
 
+      def __lt__(self, value: int) -> ConstrainedPromise:
+          return self._constraint("<", value)
 
-@dataclass()
-class One(Quant):
-    tasks: list[Callable | int]
+      def __ge__(self, value: int) -> ConstrainedPromise:
+          return self._constraint(">=", value)
 
+      def __gt__(self, value: int) -> ConstrainedPromise:
+          return self._constraint(">", value)
+class EdgePromise(ConstraintOpsMixin,Promise):
+    def __init__(self, from_nodes: ListTaskOrTaskType | All, to_nodes: ListTaskOrTaskType | All):
+        self.from_nodes = from_nodes
+        self.to_nodes = to_nodes
 
-@dataclass()
-class Some(Quant):
-    tasks: list[Callable | int]
+class NodePromise(ConstraintOpsMixin,Promise):
+    # To node must be list task type as we don't know any ids yet
+    def __init__(self,from_nodes : ListTaskOrTaskType | All,to_nodes : ListTaskType | All) -> None:
+        super().__init__()
+        self.from_nodes = from_nodes
+        self.to_nodes = to_nodes
 
+@dataclass(eq=True, frozen=True)
+class ConstrainedPromise:
+    promise : EdgePromise | NodePromise
+    op : Literal["==","<=","<",">=",">"]
+    n : int 
 
-@dataclass()
-class FS(Quant):
-    tasks: list[Callable | int]  # Just a finite set
+ 
 
-
-@dataclass
-class All(Quant):
-    pass
-
-
-@dataclass()
-class Promise:
-    from_nodes: FS | All
-    to_nodes: NONE | One | Some
+    
 
 
 # Constraints End
@@ -112,11 +129,11 @@ def worker_function(init_task_context: TaskContext, result_dict: dict, fn):
     return result
 
 
-def applicable(rule_applies: FS | All, typed_task: TypedTask) -> bool:
+def applicable(rule_applies: ListTaskOrTaskType | All, typed_task: TypedTask) -> bool:
     match rule_applies:
         case All():
             return True  # All rules apply always
-        case FS(tasks=rule_task_list):
+        case list(rule_task_list):
             for rule_task in rule_task_list:
                 if isinstance(rule_task, int) and typed_task.task_id == rule_task:
                     return True
@@ -131,94 +148,122 @@ def applicable(rule_applies: FS | All, typed_task: TypedTask) -> bool:
 class ConstraintChecker:
     def __init__(self) -> None:
         # Forward graph
-        self.current_edges: dict[
-            int, tuple[str, list[TypedTask]]
-        ] = {}  # Map from resource to list of task ids using it
+        self.id_to_name : dict[int, str] = {}
+        self.current_edges: dict[int, set[int]] = defaultdict(set)  # Map from resource to list of task ids using it
+
+        self.spawn_map : dict[int,set[int]] = defaultdict(set) # Map from spawner task id to spawned task ids
         # Store all constraints together
-        self.constraints: list[Promise] = []
+        self.constraints: list[ConstrainedPromise] = []
+
+    def _check_op(self, lhs: int, op: COMPOPS, rhs: int) -> bool:
+        match op:
+            case "==":
+                return lhs == rhs
+            case "<=":
+                return lhs <= rhs
+            case "<":
+                return lhs < rhs
+            case ">=":
+                return lhs >= rhs
+            case ">":
+                return lhs > rhs
+        raise ValueError(f"Unknown op {op}")
+    
+    def get_ids_from_tasklist(self,task_list : ListTaskOrTaskType | All) -> list[int]:
+        match task_list:
+            case All():
+                return list(self.current_edges.keys())
+            case list(tl):
+                res = []
+                for task in tl:
+                    if isinstance(task, int):
+                        res.append(task)
+                    elif isinstance(task, Callable):
+                        for task_id, task_name in self.id_to_name.items():
+                            if task_name == task.__qualname__:
+                                res.append(task_id)
+                return res
+            case _:
+                raise ValueError("Invalid task list")
+       
+
+    def _check_edge_constraint(self,edge_promise : EdgePromise,op : COMPOPS,n : int) -> bool:
+        # For each node in from count the number of outgoing edges to to_nodes
+        from_node_ids = self.get_ids_from_tasklist(edge_promise.from_nodes)
+        to_node_ids = self.get_ids_from_tasklist(edge_promise.to_nodes)
+        count = 0 
+        to_node_id_set = set(to_node_ids)
+        for from_id in from_node_ids:
+            count += len(self.current_edges[from_id].intersection(to_node_id_set))
+        return self._check_op(count,op,n)
+
+
+    
+    
+    def _check_node_constraint(self,node_promise : NodePromise,op : COMPOPS,n : int) -> bool:
+        # For each node in from count the number of spawned nodes in to_nodes
+    
+        from_node_ids = self.get_ids_from_tasklist(node_promise.from_nodes)
+        to_node_ids = self.get_ids_from_tasklist(node_promise.to_nodes) # type: ignore[arg-type]
+        count = 0 
+        to_node_id_set = set(to_node_ids)
+        for from_id in from_node_ids:
+            count += len(self.spawn_map[from_id].intersection(to_node_id_set))
+        return self._check_op(count,op,n)
+        
 
     def _check_constraint(
-        self, id_filter: Optional[int] = None, constraint_filter: Optional[int] = None
-    ) -> bool:
-        # Get relevant tasks
-        task_ids = [id_filter] if id_filter is not None else self.current_edges.keys()
-        # Get relevant constraints
-        constraints = (
-            [self.constraints[constraint_filter]]
-            if constraint_filter is not None
-            else self.constraints
-        )
-        for task_id in task_ids:
-            task_name, dep_tasks = self.current_edges[task_id]
-            for constraint in constraints:
-                if not applicable(constraint.from_nodes, TypedTask(task_name, task_id)):
-                    continue
-                # Now check the constraint
-                match constraint.to_nodes:
-                    case NONE():
-                        if len(dep_tasks) != 0:
+        self, constraint_indexes : Sequence[int]) -> bool:
+        for idx in constraint_indexes:
+                constraint = self.constraints[idx]
+                match  constraint.promise:
+                    case EdgePromise():
+                        if not self._check_edge_constraint(constraint.promise, constraint.op, constraint.n):
                             return False
-                    case One(tasks=task_list):
-                        # Only allowed to create one from the list
-                        # Count how many from the list are in dep_tasks
-                        count = 0
-                        for tsk in task_list:
-                            match tsk:
-                                case Callable():
-                                    if tsk.__qualname__ in [t.name for t in dep_tasks]:
-                                        count += 1
-                                case int(task_id):
-                                    if task_id in [t.task_id for t in dep_tasks]:
-                                        count += 1
-                        if count != 1:
+                    case NodePromise():
+                        if not self._check_node_constraint(constraint.promise, constraint.op, constraint.n):
                             return False
-                    case Some(tasks=task_list):
-                        # Only allowed to create one from the list
-                        # Count how many from the list are in dep_tasks
-                        atleastone = False
-                        for tsk in task_list:
-                            if isinstance(tsk, Callable) and tsk.__qualname__ in [
-                                t.name for t in dep_tasks
-                            ]:
-                                atleastone = True
-                                break
-                            elif isinstance(tsk, int):
-                                if task_id in [t.task_id for t in dep_tasks]:
-                                    atleastone = True
-                                    break
-                        if not atleastone:
-                            return False
-                    case _:
-                        raise ValueError(f"Unexpected quantifier {constraint.to_nodes}")
         return True
+    
+    def _task_relevant_constraints(self,task_id :int) -> list[int]:
+        res = []
+        for idx in range(len(self.constraints)):
+            constraint = self.constraints[idx]
+            typed_task = TypedTask(self.id_to_name[task_id],task_id)
+            match constraint.promise:
+                case EdgePromise():
+                    promise : EdgePromise = constraint.promise # type: ignore[assignment]
+                    outgoing = applicable(promise.from_nodes,typed_task)
+                    incoming = applicable(promise.to_nodes,typed_task) # type: ignore[assignment]
+                    if outgoing or incoming:
+                        res.append(idx) 
+                case NodePromise():
+                    promise : NodePromise = constraint.promise # type: ignore[assignment]
+                    outgoing = applicable(promise.from_nodes,typed_task)
+                    incoming = applicable(promise.to_nodes,typed_task) # type: ignore[assignment]
+                    if outgoing or incoming:
+                        res.append(idx)
+        return res 
 
     def add_deps(
-        self, n1: TypedTask, n2: list[TypedTask]
+        self,spawn_task : TypedTask, n1: TypedTask, n2: list[TypedTask]
     ) -> bool:  # False if dependency causes a violation
+        applicable_constraints = []
+        self.spawn_map[spawn_task.task_id].add(n1.task_id)
+        applicable_constraints.extend(self._task_relevant_constraints(spawn_task.task_id))
+        self.id_to_name[n1.task_id] = n1.name
+        applicable_constraints.extend(self._task_relevant_constraints(n1.task_id))
         for n2_task in n2:
-            if n2_task.task_id not in self.current_edges:
-                self.current_edges[n2_task.task_id] = (n2_task.name, [])
-            self.current_edges[n2_task.task_id][1].append(n1)
-            good = self._check_constraint(id_filter=n2_task.task_id)  # Check for n2
-            if not good:
-                return False
-        return True
+            self.id_to_name[n2_task.task_id] = n2_task.name
+            self.current_edges[n2_task.task_id].add(n1.task_id)
+            applicable_constraints.extend(self._task_relevant_constraints(n2_task.task_id))
+        # Check all applicable constraints
+        return self._check_constraint(applicable_constraints)
 
-    def add_constraint(self, constraint: Promise) -> bool:
-        match constraint.from_nodes:
-            case All():
-                self.constraints.append(constraint)
-                if not self._check_constraint(
-                    constraint_filter=len(self.constraints) - 1
-                ):
-                    return False
-            case FS(tasks=task_list):
-                self.constraints.append(constraint)
-                if not self._check_constraint(
-                    constraint_filter=len(self.constraints) - 1
-                ):
-                    return False
-        return True
+    def add_constraint(self, constraint: ConstrainedPromise) -> bool:
+        self.constraints.append(constraint)
+        return self._check_constraint([len(self.constraints) - 1])
+        
 
 
 class ExecStatus(Enum):
@@ -409,7 +454,7 @@ class Workflow:
             )
             for dep in depends_on
         ]
-        if not self.constraint_checker.add_deps(
+        if not self.constraint_checker.add_deps(TypedTask(self.task_graph[spawn_id].task_func.__qualname__, spawn_id) if spawn_id is not None else TypedTask("_ROOT",0),
             TypedTask(func.__qualname__, self.next_node_number), typed_deps
         ):
             return -1  # Dependency addition failed due to constraint violation
@@ -421,7 +466,7 @@ class Workflow:
         self.next_node_number += 1
         return task_obj.task_id
 
-    def _add_promise(self, promise: Promise):
+    def _add_promise(self, promise: ConstrainedPromise):
         return self.constraint_checker.add_constraint(promise)
 
     def _read_messages(self) -> bool:
@@ -538,7 +583,7 @@ class WorkflowClient:
         self.task_context.to_server.put_nowait(("wait", ()))
         _ = self.task_context.from_server.get()
 
-    def add_promise(self, promise: Promise):
+    def add_promise(self, promise: ConstrainedPromise):
         self.task_context.to_server.put_nowait(("add_promise", (promise,)))
         _ = self.task_context.from_server.get()
 
