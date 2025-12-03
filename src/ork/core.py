@@ -2,6 +2,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import json
+import time
 from typing import Callable, Literal, Optional, Sequence
 from multiprocessing import Process, Manager
 from multiprocessing import Queue as MPQueue
@@ -9,18 +10,14 @@ import logging
 from queue import Empty
 from abc import ABC
 from enum import Enum
+from datetime import datetime
 import uuid
 from pydantic import BaseModel
+
+from ork.event import Event, MessageEvent
 from .promise import EdgePromise,NodePromise,ConstrainedPromise,All,ListTaskOrTaskType,ListTaskType,COMPOPS
-
+from pathlib import Path
 logger = logging.getLogger(__name__)
-
-
-
- 
-
-    
-
 
 # Constraints End
 # Utils Classes
@@ -268,7 +265,9 @@ class Workflow:
         self._start = False
         self.wait_qs: list[MPQueue] = []
         self.constraint_checker = ConstraintChecker()
-        self.event_log_file_handle = open(f"workflow_{self.workflow_id}_events.jsonl","a")
+        event_log_path = Path("event_logs") / f"workflow_{self.workflow_id}_events.jsonl"
+        event_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.event_log_file_handle = open(event_log_path,"a")
 
     @classmethod
     def create_server(cls) -> WorkflowClient:
@@ -454,11 +453,8 @@ class Workflow:
             while (msg := get_opt(context.to_server)) is not None:
 
                 msg_action, args = msg
-                self.event_log_file_handle.write(json.dumps({
-                    "type" : "message",
-                    "action" : msg_action,
-                    "args" : [serialize_arg(a) for a in args]
-                }) + "\n")
+                message_event = Event(timestamp=datetime.now().timestamp(), event=MessageEvent(action=msg_action, args=[serialize_arg(a) for a in args]))
+                self.event_log_file_handle.write(message_event.model_dump_json() + "\n")
                 self.event_log_file_handle.flush() # Flush to display immediately
                 match msg_action:
                     case "add_task":
