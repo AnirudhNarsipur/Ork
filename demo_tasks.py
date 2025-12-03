@@ -32,10 +32,8 @@ def t5(tctx: ork.TaskContext):
     print("hello from t5")
     
 
-
-# Create a workflow and register some tasks statically
-def main():
-    wf = ork.Workflow.create_server() # Spawns a server process and returns a client to the server
+def root_task(tctx: ork.TaskContext):
+    wf = ork.WorkflowClient(tctx) # Create a workflow client from the task context
 
     task1_id = wf.add_task(t1) # Add t1 as a task with no dependencies and returns a task id
     task2_id = wf.add_task(t2, depends_on=[ork.FromEdge(task1_id)]) # Add t2 as a task depending on t1
@@ -43,7 +41,12 @@ def main():
     # Add t4 depending on t1 and a conditional dependency on t2 . The t2 dependency is only enforced if t3 returns True
     wf.add_task(t4, depends_on=[ork.FromEdge(task1_id), ork.FromEdge(task2_id,task3_id)])
     # No outgoing edges for any instance of t5
-    wf.add_promise(ork.OrkPromise(ork.FS([t5]),ork.NONE()) )
+    wf.add_promise(ork.Promise(ork.FS([t5]),ork.NONE()) )
     wf.commit() # Commit created tasks - marking them as ready for execution. If not committed, tasks will not run.
     wf.start() # Start executing tasks in the workflow
-    wf.join() # Block until all tasks have completed
+    wf.wait() # Block until all tasks have completed
+
+# Create a workflow and register some tasks statically
+def main():
+    wf = ork.run(root_task)
+    wf.wait()

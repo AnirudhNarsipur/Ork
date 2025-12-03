@@ -1,6 +1,6 @@
 from __future__ import annotations
-from collections import defaultdict
 from dataclasses import dataclass
+import json
 from typing import Callable, Literal, Optional
 from multiprocessing import Process, Manager
 from multiprocessing import Queue as MPQueue
@@ -8,7 +8,7 @@ import logging
 from queue import Empty
 from abc import ABC
 from enum import Enum
-import functools
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class All(Quant):
 
 
 @dataclass()
-class OrkPromise():
+class Promise:
     from_nodes: FS | All
     to_nodes: NONE | One | Some
 
@@ -67,6 +67,7 @@ class OrkTask:
     task_func: Callable
     status: OrkTaskStatus
     depends_on: set[FromEdge]
+    parent_id: Optional[int] = None  # None only for the root task
     task_context_id: Optional[int] = None  # Set when task is running
     task_process: Optional[Process] = None  # Set when task is running
 
@@ -118,9 +119,12 @@ def applicable(rule_applies: FS | All, typed_task: TypedTask) -> bool:
         case FS(tasks=rule_task_list):
             for rule_task in rule_task_list:
                 if isinstance(rule_task, int) and typed_task.task_id == rule_task:
-                        return True
-                elif isinstance(rule_task, Callable) and typed_task.name == rule_task.__qualname__:
-                            return True
+                    return True
+                elif (
+                    isinstance(rule_task, Callable)
+                    and typed_task.name == rule_task.__qualname__
+                ):
+                    return True
     return False
 
 
@@ -131,7 +135,7 @@ class ConstraintChecker:
             int, tuple[str, list[TypedTask]]
         ] = {}  # Map from resource to list of task ids using it
         # Store all constraints together
-        self.constraints: list[OrkPromise] = []
+        self.constraints: list[Promise] = []
 
     def _check_constraint(
         self, id_filter: Optional[int] = None, constraint_filter: Optional[int] = None
@@ -200,7 +204,7 @@ class ConstraintChecker:
                 return False
         return True
 
-    def add_constraint(self, constraint: OrkPromise) -> bool:
+    def add_constraint(self, constraint: Promise) -> bool:
         match constraint.from_nodes:
             case All():
                 self.constraints.append(constraint)
@@ -230,6 +234,7 @@ class Workflow:
 
     def __init__(self):
         # Task Node Objects
+        self.workflow_id : str = str(uuid.uuid7())
         self.manager = Manager()
         self.result_dict = self.manager.dict()
         self.task_graph: dict[int, OrkTask] = {}
@@ -238,6 +243,7 @@ class Workflow:
         self._start = False
         self.wait_qs: list[MPQueue] = []
         self.constraint_checker = ConstraintChecker()
+        self.event_log_file_handle = open(f"workflow_{self.workflow_id}_events.jsonl","a")
 
     @classmethod
     def create_server(cls) -> WorkflowClient:
@@ -379,9 +385,14 @@ class Workflow:
         for context in self.contexts:
             context.to_server.close()
             context.from_server.close()
+        # Close event log file
+        self.event_log_file_handle.close()
 
     def _add_task(
-        self, func: Callable, depends_on: Optional[set[FromEdge]] = None
+        self,
+        func: Callable,
+        depends_on: Optional[set[FromEdge]] = None,
+        spawn_id: Optional[int] = None,
     ) -> int:
         if depends_on is None:
             depends_on = set()
@@ -402,22 +413,31 @@ class Workflow:
             TypedTask(func.__qualname__, self.next_node_number), typed_deps
         ):
             return -1  # Dependency addition failed due to constraint violation
-        task_obj = OrkTask(self.next_node_number, func, "creating", depends_on)
+
+        task_obj = OrkTask(
+            self.next_node_number, func, "creating", depends_on, parent_id=spawn_id
+        )
         self.task_graph[self.next_node_number] = task_obj
         self.next_node_number += 1
         return task_obj.task_id
 
-    def _add_promise(self, promise: OrkPromise):
+    def _add_promise(self, promise: Promise):
         return self.constraint_checker.add_constraint(promise)
 
     def _read_messages(self) -> bool:
         for context in self.contexts:
             while (msg := get_opt(context.to_server)) is not None:
+
                 msg_action, args = msg
+                self.event_log_file_handle.write(json.dumps({
+                    "type" : msg_action,
+                    "args" : [str(a) for a in args]
+                }) + "\n")
+                self.event_log_file_handle.flush() # Flush to display immediately
                 match msg_action:
                     case "add_task":
-                        func, depends_on = args
-                        res_task_id = self._add_task(func, depends_on)
+                        func, depends_on, spawn_id = args
+                        res_task_id = self._add_task(func, depends_on, spawn_id)
                         if res_task_id == -1:
                             return False
                         # TODO: This could block but assume that the queue always has space
@@ -431,7 +451,7 @@ class Workflow:
                             context.from_server.put(None)
                     case "start":
                         self._start = True
-                    case "join":
+                    case "wait":
                         # Block until all tasks complete
                         self.wait_qs.append(context.from_server)
                     case "add_promise":
@@ -442,6 +462,7 @@ class Workflow:
                             )
                             return False
                         context.from_server.put(None)
+
         return True
 
     def start_server(self):
@@ -492,7 +513,12 @@ class WorkflowClient:
         Returns:
             The task id of the created task
         """
-        self.send_message(("add_task", (func, set(depends_on) if depends_on else None)))
+        spawn_id = None
+        if isinstance(self.task_context, TaskContext):
+            spawn_id = self.task_context.task_id
+        self.send_message(
+            ("add_task", (func, set(depends_on) if depends_on else None, spawn_id))
+        )
         res_task_id = self.recv_message()
         self.to_commit.append(res_task_id)
         print("Created task id", res_task_id)
@@ -508,10 +534,18 @@ class WorkflowClient:
     def start(self):
         self.task_context.to_server.put_nowait(("start", ()))
 
-    def join(self):
-        self.task_context.to_server.put_nowait(("join", ()))
+    def wait(self):
+        self.task_context.to_server.put_nowait(("wait", ()))
         _ = self.task_context.from_server.get()
 
-    def add_promise(self, promise: OrkPromise):
+    def add_promise(self, promise: Promise):
         self.task_context.to_server.put_nowait(("add_promise", (promise,)))
         _ = self.task_context.from_server.get()
+
+
+def run(root_task: Callable):
+    wf_client = Workflow.create_server()
+    _ = wf_client.add_task(root_task)
+    wf_client.commit()
+    wf_client.start()
+    return wf_client
