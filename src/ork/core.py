@@ -2,7 +2,6 @@ from __future__ import annotations
 from abc import ABC
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-import json
 from typing import Any, Callable, Literal, Optional, Sequence
 from multiprocessing import Process, Manager
 from multiprocessing import Queue as MPQueue
@@ -123,8 +122,8 @@ def get_opt(q: MPQueue):
         return None
 
 
-def start_server(init_task_context: TaskContext):
-    wf = Workflow()
+def start_server(init_task_context: TaskContext,workflow_id : Optional[str] = None):
+    wf = Workflow(workflow_id=workflow_id)
     wf._register_context(init_task_context)
     wf.start_server()
 
@@ -329,9 +328,9 @@ class Workflow:
     Not exposed
     """
 
-    def __init__(self):
+    def __init__(self, workflow_id: Optional[str] = None):
         # Task Node Objects
-        self.workflow_id : str = uuid.uuid7().hex
+        self.workflow_id : str = workflow_id if workflow_id is not None else uuid.uuid7().hex
         self.manager = Manager()
         self.result_dict = self.manager.dict()
         self.task_graph: dict[int, OrkTask] = {}
@@ -342,14 +341,15 @@ class Workflow:
         self.constraint_checker = ConstraintChecker()
         event_log_path = Path("event_logs") / f"workflow_{self.workflow_id}_events.jsonl"
         event_log_path.parent.mkdir(parents=True, exist_ok=True)
+        event_log_path.unlink(missing_ok=True)  # Remove existing log file 
         self.event_log_file_handle = open(event_log_path,"a")
         self.cases : list[deque[tuple[Cond,int]]] = [] # List of cases for each conditional task id
 
 
     @classmethod
-    def create_server(cls) -> WorkflowClient:
+    def create_server(cls,workflow_id : Optional[str] = None ) -> WorkflowClient:
         init_task_context = ClientContext(MPQueue(), MPQueue())
-        server_process = Process(target=start_server, args=(init_task_context,))
+        server_process = Process(target=start_server, args=(init_task_context,workflow_id))
         server_process.start()
         print("server pid", server_process.pid)
         return WorkflowClient(init_task_context)
@@ -761,8 +761,8 @@ class WorkflowClient:
         _ = self.task_context.from_server.get()
 
 
-def run(root_task: Callable):
-    wf_client = Workflow.create_server()
+def run(root_task: Callable, workflow_id: Optional[str] = None):
+    wf_client = Workflow.create_server(workflow_id=workflow_id)
     _ = wf_client.add_task(root_task)
     wf_client.commit()
     wf_client.start()
