@@ -1,23 +1,22 @@
 from __future__ import annotations
+from abc import ABC
 from collections import defaultdict
 from dataclasses import dataclass
-import json
-import time
-from typing import Callable, Literal, Optional, Sequence
+from typing import Any, Callable, Literal, Optional, Sequence
 from multiprocessing import Process, Manager
 from multiprocessing import Queue as MPQueue
 import logging
 from queue import Empty
-from abc import ABC
 from enum import Enum
 from datetime import datetime
 import uuid
-from pydantic import BaseModel
+from collections import deque
 
 from ork.event import Event, MessageEvent
-from .promise import EdgePromise,NodePromise,ConstrainedPromise,All,ListTaskOrTaskType,ListTaskType,COMPOPS
+from .promise import EdgePromise,NodePromise,ConstrainedPromise,All,ListTaskOrTaskType,COMPOPS
 from pathlib import Path
 logger = logging.getLogger(__name__)
+ROOT_TASK_ID = 0  # Synthetic root task id reserved from user tasks
 
 # Constraints End
 # Utils Classes
@@ -27,7 +26,7 @@ class FromEdge:
     cond: Optional[int] = None
 
 
-OrkTaskStatus = Literal["creating", "pending", "running", "completed", "failed"]
+OrkTaskStatus = Literal["creating","conditioned", "pending", "running", "completed", "failed"]
 
 
 @dataclass()
@@ -39,6 +38,7 @@ class OrkTask:
     parent_id: Optional[int] = None  # None only for the root task
     task_context_id: Optional[int] = None  # Set when task is running
     task_process: Optional[Process] = None  # Set when task is running
+    conditioned : bool = False # Whether the task is part of a conditional case
 
 
 @dataclass()
@@ -58,6 +58,57 @@ class TypedTask:
     task_id: int
 
 
+class Cond(ABC):
+    pass 
+class CondAtom(Cond):
+    def __init__(self,inp: int | bool): # Either the result of a task with id inp or a boolean constant
+        self.inp = inp
+@dataclass(eq=True, frozen=True)
+class AndCond(Cond):
+    args : list[Cond]
+@dataclass(eq=True, frozen=True)
+class OrCond(Cond):
+    args : list[Cond]
+@dataclass(eq=True, frozen=True)
+class NegCond(Cond):
+    arg : Cond
+
+
+# Evaluate a condition given a model i.e a result dict 
+def evaluate_cond(cond : Cond, result_dict: dict[int,Any]) -> Optional[bool]:
+    """ Returns None if condition cannot be evaluated yet """
+    match cond:
+        case CondAtom():
+            if isinstance(cond.inp, bool):
+                return cond.inp
+            elif isinstance(cond.inp, int):
+                if cond.inp not in result_dict:
+                    return None
+                res = result_dict[cond.inp]
+                assert isinstance(res, bool), f"Expected boolean result for task {cond.inp}"
+                return res
+        case AndCond():
+            for arg in cond.args:
+                res = evaluate_cond(arg,result_dict)
+                if res is None:
+                    return None
+                if not res:
+                    return False
+            return True
+        case OrCond():
+            for arg in cond.args:
+                res = evaluate_cond(arg,result_dict)
+                if res is None:
+                    return None
+                if res:
+                    return True
+            return False
+        case NegCond():
+            res = evaluate_cond(cond.arg,result_dict)
+            if res is None:
+                return None
+            return not res
+    raise ValueError("Unknown condition type")
 # Util classes end
 
 
@@ -205,13 +256,16 @@ class ConstraintChecker:
         return res 
 
     def add_deps(
-        self,spawn_task : TypedTask, n1: TypedTask, n2: list[TypedTask]
+        self,spawn_task : Optional[TypedTask], n1: TypedTask, n2: list[TypedTask]
     ) -> bool:  # False if dependency causes a violation
         applicable_constraints = []
-        self.spawn_map[spawn_task.task_id].add(n1.task_id)
+        if spawn_task is not None:
+            self.spawn_map[spawn_task.task_id].add(n1.task_id)
+            applicable_constraints.extend(self._task_relevant_constraints(spawn_task.task_id))
+        else:
+            self.spawn_map[ROOT_TASK_ID].add(n1.task_id) # Is a root task
         self.id_to_name[n1.task_id] = n1.name
         applicable_constraints.extend(self._task_relevant_constraints(n1.task_id))
-        applicable_constraints.extend(self._task_relevant_constraints(spawn_task.task_id))
         for n2_task in n2:
             self.id_to_name[n2_task.task_id] = n2_task.name
             self.current_edges[n2_task.task_id].add(n1.task_id)
@@ -261,13 +315,15 @@ class Workflow:
         self.result_dict = self.manager.dict()
         self.task_graph: dict[int, OrkTask] = {}
         self.contexts: list[ClientContext] = []
-        self.next_node_number = 0  # 0 - indexed
+        self.next_node_number = ROOT_TASK_ID + 1 # 1- indexed reserve 0 for fake root task 
         self._start = False
         self.wait_qs: list[MPQueue] = []
         self.constraint_checker = ConstraintChecker()
         event_log_path = Path("event_logs") / f"workflow_{self.workflow_id}_events.jsonl"
         event_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.event_log_file_handle = open(event_log_path,"a")
+        self.cases : list[deque[tuple[Cond,int]]] = [] # List of cases for each conditional task id
+
 
     @classmethod
     def create_server(cls) -> WorkflowClient:
@@ -347,6 +403,30 @@ class Workflow:
                 return True
         return False
 
+    def _update_conditioned_tasks(self):
+        # For each conditioned task check if its condition can be evaluated now
+        new_case_groups = [] # Recreate without empty/fully evaluated groups
+        for case_group in self.cases:
+            evaluated = False 
+            while case_group:
+                branch_cond, task_id = case_group[0]
+                cond_result = evaluate_cond(branch_cond,self.result_dict) #type: ignore[arg-type]
+                if cond_result is None: # Can't evaluate yet
+                    break 
+                if not cond_result: # Condition is false, mark this as failed and remove from list
+                    self.task_graph[task_id].status = "failed" 
+                    case_group.popleft()
+                else: # Condition is true, mark this as pending and remove from list
+                    self.task_graph[task_id].status = "pending"
+                    evaluated = True 
+                    break
+            if case_group and not evaluated:
+                new_case_groups.append(case_group)
+        self.cases = new_case_groups
+                    
+                
+                              
+
     def _execute(self) -> ExecStatus:
         """
         Blocks until no pending tasks remaing in workflow
@@ -378,6 +458,8 @@ class Workflow:
             self.task_graph
             task_obj.status = new_status
             task_obj.task_process = None  # Unset the process handle
+        # Evaluate conditions for conditioned tasks
+        self._update_conditioned_tasks()
         # Schedule all pending tasks that can run
         for pending_task_id in pending_task_ids:
             pending_task_obj = self.task_graph[pending_task_id]
@@ -442,7 +524,7 @@ class Workflow:
             )
             for dep in depends_on
         ]
-        if not self.constraint_checker.add_deps(TypedTask(self.task_graph[spawn_id].task_func.__qualname__, spawn_id) if spawn_id is not None else TypedTask("_ROOT",0),
+        if not self.constraint_checker.add_deps(None,
             TypedTask(func.__qualname__, self.next_node_number), typed_deps
         ):
             return -1  # Dependency addition failed due to constraint violation
@@ -453,6 +535,29 @@ class Workflow:
         self.task_graph[self.next_node_number] = task_obj
         self.next_node_number += 1
         return task_obj.task_id
+    
+    def _add_cases(
+        self,
+        cases: list[tuple[Cond,Callable, Optional[list[FromEdge]]]],
+        spawn_id: Optional[int] = None,
+    ) -> list[int] | int :
+        # Create task objects for each conditional marking them as conditional
+        # Then create a map of the conditional to respective task ids 
+        res_task_ids = []
+        for case in cases:
+            cond, func, depends_on = case
+            task_id = self._add_task(
+                func,
+                depends_on,
+                spawn_id,
+            )
+            if task_id == -1:
+                return -1 
+            res_task_ids.append(task_id)
+            self.task_graph[task_id].conditioned = True
+        
+        self.cases.append(deque([(branch_cond,task_id) for task_id,(branch_cond,_,_) in zip(res_task_ids,cases)]))
+        return res_task_ids
 
     def _add_promise(self, promise: ConstrainedPromise):
         return self.constraint_checker.add_constraint(promise)
@@ -478,7 +583,12 @@ class Workflow:
                             assert self.task_graph[task_id].status == "creating", (
                                 f"Expected status to be creating for {task_id}"
                             )
-                            self.task_graph[task_id].status = "pending"
+                            #TODO: What if only some tasks in a case are committed?
+                            if self.task_graph[task_id].conditioned:
+                                self.task_graph[task_id].status = "conditioned"
+                            else:
+                                 self.task_graph[task_id].status = "pending"
+                                
                             context.from_server.put(None)
                     case "start":
                         self._start = True
@@ -493,6 +603,13 @@ class Workflow:
                             )
                             return False
                         context.from_server.put(None)
+                    case "add_cases":
+                        cases, spawn_id = args
+                        res_task_ids = self._add_cases(cases, spawn_id)
+                        if res_task_ids == -1:
+                            return False 
+                        context.from_server.put(res_task_ids)
+
 
         return True
 
@@ -554,6 +671,18 @@ class WorkflowClient:
         self.to_commit.append(res_task_id)
         print("Created task id", res_task_id)
         return res_task_id
+    
+    def add_cases(self, cases: list[tuple[Cond,Callable, Optional[list[FromEdge]]]]) -> list[int]:
+        spawn_id = None
+        if isinstance(self.task_context, TaskContext):
+            spawn_id = self.task_context.task_id
+        self.send_message(
+            ("add_cases", (cases, spawn_id))
+        )
+        res_task_ids = self.recv_message()
+        self.to_commit.extend(res_task_ids)
+        print("Created task ids", res_task_ids)
+        return res_task_ids
 
     def commit(self):
         self.send_message(("commit_task", tuple(self.to_commit)))
