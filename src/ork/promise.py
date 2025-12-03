@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Literal
 from abc import ABC
+
 ListTaskOrTaskType = list[Callable | int]
 ListTaskType = list[Callable]
 class All:
@@ -43,8 +44,13 @@ class NodePromise(ConstraintOpsMixin,Promise):
         self.from_nodes = from_nodes
         self.to_nodes = to_nodes
 
+class RunPromise(ConstraintOpsMixin,Promise):
+    def __init__(self, from_nodes : ListTaskOrTaskType | All):
+        super().__init__()
+        self.from_nodes = from_nodes # Nodes that can run at a time
+
 @dataclass(eq=True, frozen=True)
 class ConstrainedPromise:
-    promise : EdgePromise | NodePromise
+    promise : EdgePromise | NodePromise | RunPromise
     op : Literal["==","<=","<",">=",">"]
     n : int 

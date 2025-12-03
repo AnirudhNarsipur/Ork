@@ -1,5 +1,5 @@
 from .core import WorkflowClient,run,create_server, TaskContext,FromEdge,Cond,AndCond,OrCond,NegCond,CondAtom
-from .promise import EdgePromise,NodePromise,All,ConstrainedPromise,ListTaskOrTaskType,ListTaskType
+from .promise import EdgePromise,NodePromise,All,ConstrainedPromise,ListTaskOrTaskType,ListTaskType,RunPromise
 __all__ = [
     "WorkflowClient",
     "run",
@@ -7,6 +7,7 @@ __all__ = [
     "TaskContext",
     "EdgePromise",
     "NodePromise",
+    "RunPromise",
     "All",
     "ConstrainedPromise",
     "ListTaskOrTaskType",

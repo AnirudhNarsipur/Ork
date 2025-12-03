@@ -30,9 +30,9 @@ class MarkStateTransition(BaseModel):
 
 class CreatePromiseEvent(BaseModel):
     event_type : Literal["create_promise"] = "create_promise"
-    constraint_type : Literal["EdgePromise","NodePromise"]
+    constraint_type : Literal["EdgePromise","NodePromise","RunPromise"]
     from_nodes : list[str | int ] | Literal["ALL"]
-    to_nodes : list[str | int ] | Literal["ALL"]
+    to_nodes : Optional[list[str | int ] | Literal["ALL"]] = None
     constraint_op : Optional[Literal["==","<=","<",">=",">"]] = None
     constraint_n : Optional[int] = None
 

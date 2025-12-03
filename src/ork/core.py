@@ -15,7 +15,7 @@ from collections import deque
 from pydantic import BaseModel
 
 from ork.event import ConditionedTask, CreateConditionEvent, CreateNodeEvent, CreatePromiseEvent, Event, FromEdgeModel, MarkStateTransition, MessageEvent, ShutdownEvent
-from .promise import EdgePromise,NodePromise,ConstrainedPromise,All,ListTaskOrTaskType,COMPOPS
+from .promise import EdgePromise,NodePromise,ConstrainedPromise,All,ListTaskOrTaskType,COMPOPS,RunPromise
 from pathlib import Path
 logger = logging.getLogger(__name__)
 ROOT_TASK_ID = 0  # Synthetic root task id reserved from user tasks
@@ -167,6 +167,7 @@ class ConstraintChecker:
         self.node_tick: dict[int, int] = {}  # Map from node id to tick when it was added
         self.edge_tick: dict[tuple[int, int], int] = {}  # Map from (from_node, to_node) to tick when edge was added
         self.constraint_tick: list[int] = []  # Tick when each constraint was added
+        self.run_promises : list[ConstrainedPromise] = []
 
     def _check_op(self, lhs: int, op: COMPOPS, rhs: int) -> bool:
         match op:
@@ -300,7 +301,27 @@ class ConstraintChecker:
         self.tick += 1  # Increment tick before adding constraint
         self.constraint_tick.append(self.tick)  # Record tick when constraint was added
         self.constraints.append(constraint)
-        return self._check_constraint([len(self.constraints) - 1])
+        if  isinstance(constraint.promise, RunPromise):
+            return True 
+        else:
+            return self._check_constraint([len(self.constraints) - 1])
+        
+    def can_run_task(self,task_graph : dict[int, OrkTask],runnable_task : TypedTask) -> bool:
+        # For each run promise check if it is applicable
+        # If applicable check if it has capacity
+        for run_promise in self.constraints:
+            # Check if applicable
+            if not isinstance(run_promise.promise, RunPromise) or not applicable(run_promise.promise.from_nodes,runnable_task):
+                continue
+            # Count number of running tasks applicable to this promise
+            
+            applicable_task_ids = self.get_ids_from_tasklist(run_promise.promise.from_nodes)
+            running_count = sum([task_graph[tid].status == "running" for tid in applicable_task_ids if tid in task_graph])
+            assert run_promise.op in ["<=","<"] , "Run promises only support upper bound constraints"
+            # Can I support one more running task?
+            if not self._check_op(running_count + 1,run_promise.op,run_promise.n):
+                return False
+        return True
         
 
 
@@ -460,6 +481,13 @@ class Workflow:
                 return True
         return False
 
+    def _fulfills_run_promises(self,task_id : int) -> bool:
+        runnable_task = TypedTask(
+            name=self.task_graph[task_id].task_func.__qualname__,
+            task_id=task_id
+        )
+        return self.constraint_checker.can_run_task(self.task_graph,runnable_task)
+    
     def _update_conditioned_tasks(self):
         # For each conditioned task check if its condition can be evaluated now
         new_case_groups = [] # Recreate without empty/fully evaluated groups
@@ -520,8 +548,9 @@ class Workflow:
         for pending_task_id in pending_task_ids:
             pending_task_obj = self.task_graph[pending_task_id]
             all_complete = self._all_deps_complete(pending_task_id)
+            fulfills_run_promises = self._fulfills_run_promises(pending_task_id)
             failed_deps = self._any_deps_fail(pending_task_id)
-            if all_complete:
+            if all_complete and fulfills_run_promises:
                 self._schedule_task(pending_task_id)
                 pending_task_obj.status = "running"
             # If dependent tasks failed then propagate failure
@@ -644,9 +673,9 @@ class Workflow:
         self.append_event(Event(
             timestamp=datetime.now().timestamp(),
             event=CreatePromiseEvent(
-                constraint_type="EdgePromise"  if isinstance(promise.promise, EdgePromise) else "NodePromise", #TODO
+                constraint_type=promise.promise.__class__.__name__, # type: ignore[attr-defined]
                 from_nodes=serialize_tasktype_id_ls(promise.promise.from_nodes),
-                to_nodes=serialize_tasktype_id_ls(promise.promise.to_nodes), # type: ignore[arg-type]
+                to_nodes=serialize_tasktype_id_ls(promise.promise.to_nodes) if not isinstance(promise.promise, RunPromise) else None, # type: ignore[arg-type]
                 constraint_op=promise.op,
                 constraint_n=promise.n,
             ),
@@ -679,7 +708,7 @@ class Workflow:
                             else:
                                  self.transition_state(task_id,"pending")
                                 
-                            context.from_server.put(None)
+                        context.from_server.put(None)
                     case "start":
                         self._start = True
                     case "wait":
@@ -777,6 +806,8 @@ class WorkflowClient:
         return res_task_ids
 
     def commit(self):
+        if not self.to_commit:
+            return
         self.send_message(("commit_task", tuple(self.to_commit)))
         _ = self.recv_message()
         print("Committed ", self.to_commit)
@@ -786,7 +817,8 @@ class WorkflowClient:
     def start(self):
         self.task_context.to_server.put_nowait(("start", ()))
 
-    def wait(self):
+    def wait(self): 
+        #TODO: This will cause bugs if FIFO is not preserved
         self.task_context.to_server.put_nowait(("wait", ()))
         _ = self.task_context.from_server.get()
 

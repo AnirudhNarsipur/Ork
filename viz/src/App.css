@@ -179,6 +179,15 @@
   display: block;
 }
 
+.promise-item.runpromise {
+  background: #fff3cd;
+  border-color: #ffc107;
+}
+
+.promise-item.runpromise .promise-type {
+  color: #856404;
+}
+
 /* Task Graph */
 .task-graph {
   flex: 1;

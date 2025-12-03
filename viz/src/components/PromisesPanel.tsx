@@ -4,14 +4,23 @@ interface PromisesPanelProps {
   promises: Promise[];
 }
 
-function formatNodes(nodes: (string | number)[] | "ALL"): string {
+function formatNodes(nodes: (string | number)[] | "ALL" | null | undefined): string {
   if (nodes === "ALL") return "ALL";
+  if (nodes === null || nodes === undefined) return "-";
   return nodes.join(", ");
 }
 
 function formatConstraint(promise: Promise): string {
   if (promise.constraintOp && promise.constraintN !== undefined) {
     return `${promise.constraintOp} ${promise.constraintN}`;
+  }
+  return "";
+}
+
+function getPromiseDescription(promise: Promise): string {
+  if (promise.constraintType === "RunPromise") {
+    const constraint = formatConstraint(promise);
+    return `Max ${promise.constraintN} concurrent`;
   }
   return "";
 }
@@ -25,18 +34,24 @@ export function PromisesPanel({ promises }: PromisesPanelProps) {
       ) : (
         <ul className="promise-list">
           {promises.map((promise, idx) => (
-            <li key={idx} className="promise-item">
+            <li key={idx} className={`promise-item ${promise.constraintType.toLowerCase()}`}>
               <span className="promise-type">{promise.constraintType}</span>
               <div className="promise-detail">
                 <span className="promise-from">
-                  From: <strong>{formatNodes(promise.fromNodes)}</strong>
+                  {promise.constraintType === "RunPromise" ? "Tasks" : "From"}:{" "}
+                  <strong>{formatNodes(promise.fromNodes)}</strong>
                 </span>
-                <span className="promise-to">
-                  To: <strong>{formatNodes(promise.toNodes)}</strong>
-                </span>
+                {promise.constraintType !== "RunPromise" && (
+                  <span className="promise-to">
+                    To: <strong>{formatNodes(promise.toNodes)}</strong>
+                  </span>
+                )}
                 {formatConstraint(promise) && (
                   <span className="promise-constraint">
-                    Constraint: <strong>{formatConstraint(promise)}</strong>
+                    {promise.constraintType === "RunPromise"
+                      ? `Max concurrent: ${promise.constraintN}`
+                      : `Constraint: ${formatConstraint(promise)}`
+                    }
                   </span>
                 )}
               </div>

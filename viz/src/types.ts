@@ -28,9 +28,9 @@ export interface MarkStateTransition {
 
 export interface CreatePromiseEvent {
   event_type: "create_promise";
-  constraint_type: "EdgePromise" | "NodePromise";
+  constraint_type: "EdgePromise" | "NodePromise" | "RunPromise";
   from_nodes: (string | number)[] | "ALL";
-  to_nodes: (string | number)[] | "ALL";
+  to_nodes?: (string | number)[] | "ALL" | null;
   constraint_op?: "==" | "<=" | "<" | ">=" | ">";
   constraint_n?: number;
 }
@@ -83,9 +83,9 @@ export interface GraphEdge {
 }
 
 export interface Promise {
-  constraintType: "EdgePromise" | "NodePromise";
+  constraintType: "EdgePromise" | "NodePromise" | "RunPromise";
   fromNodes: (string | number)[] | "ALL";
-  toNodes: (string | number)[] | "ALL";
+  toNodes?: (string | number)[] | "ALL" | null;
   constraintOp?: "==" | "<=" | "<" | ">=" | ">";
   constraintN?: number;
 }
