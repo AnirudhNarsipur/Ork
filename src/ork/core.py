@@ -87,7 +87,8 @@ def evaluate_cond(cond : Cond, result_dict: dict[int,Any]) -> Optional[bool]:
                 if cond.inp not in result_dict:
                     return None
                 res = result_dict[cond.inp]
-                assert isinstance(res, bool), f"Expected boolean result for task {cond.inp}"
+                err_msg = f"Expected boolean result for task {cond.inp}, got val {res} of {type(res)}"
+                assert isinstance(res, bool), err_msg
                 return res
         case AndCond():
             for arg in cond.args:

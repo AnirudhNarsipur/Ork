@@ -8,23 +8,24 @@ import pandas as pd
 import requests
 
 # Adapted from https://www.union.ai/docs/v1/flyte/tutorials/bioinformatics/blast/blastx-example/
-
+WF1_DIR = os.path.join(str(Path(__file__).parent.parent.absolute()), "wf_data", "wf1")
 def download_dataset(tctx: ork.TaskContext,args):
-    Path("kitasatospora").mkdir(exist_ok=True)
+    input_dir_path = (Path(WF1_DIR) / "kitasatospora")
+    input_dir_path.mkdir(exist_ok=True)
     r = requests.get("https://api.github.com/repos/flyteorg/flytesnacks/contents/blast/kitasatospora?ref=datasets")
     for each_file in r.json():
         download_url = each_file["download_url"]
-        file_name = f"kitasatospora/{Path(download_url).name}"
-        if not Path(file_name).exists():
+        file_path = input_dir_path / Path(download_url).name
+        if not file_path.exists():
             r_file = requests.get(each_file["download_url"])
-            open(file_name, "wb").write(r_file.content)
-    return Path("kitasatospora").absolute()
+            open(str(file_path), "wb").write(r_file.content)
+    return input_dir_path
 
 def run_blastx(tctx: ork.TaskContext,args):
     datadir : str = args[0]
     query: str = "k_sp_CB01950_penicillin.fasta"
     db: str = "kitasatospora_proteins.faa"
-    outdir = os.path.join(str(Path(__file__).parent.absolute()), "wf_data", "wf1")
+    outdir = os.path.join(str(Path(__file__).parent.parent.absolute()), "wf_data", "wf1")
     blast_output = "AMK19_00175_blastx_kitasatospora.tab"
     script=f"""
     #!/bin/bash
@@ -48,13 +49,14 @@ def run_blastx(tctx: ork.TaskContext,args):
           capture_output=True,      # remove if you want live stdout/err
           text=True                 # decode bytes to str
       )
-    print("stdout:", result.stdout)
-    print("stderr:", result.stderr)
+    print("blastx stdout:", result.stdout)
+    print("blastx stderr:", result.stderr)
     return result.returncode, os.path.join(outdir, blast_output)
 
 
-def blastx_output(blastout_path: str):
+def blastx_output(tctx: ork.TaskContext,args):
     # read BLASTX output
+    blastout_path = args[0][1]
     result = pd.read_csv(blastout_path, sep="\t", header=None)
 
     # define column headers
@@ -87,7 +89,7 @@ def secret_task(tctx: ork.TaskContext,args):
     print("I am a secret task! Don't let me spawn dynamically!")
 
 def is_batchx_success(stctx: ork.TaskContext,args):
-    print("Generated Blastx output!")
+    print("Generated Blastx output successfully!")
     # Marker 2: Spawn a secret task dynamically
     # wf = ork.WorkflowClient(stctx)
     # wf.add_task(secret_task)
@@ -105,18 +107,18 @@ def declare_blast_wf():
     blastx_output_id = wf_client.add_task(blastx_output, depends_on=[ork.FromEdge(blastx_id)])
     case_ids = wf_client.add_cases(
         [
-            (ork.CondAtom(blastx_id), is_batchx_success,None),
-            (ork.NegCond(ork.CondAtom(blastx_id)), is_batchx_failure,None),
+            (ork.CondAtom(blastx_output_id), is_batchx_success,None),
+            (ork.NegCond(ork.CondAtom(blastx_output_id)), is_batchx_failure,None),
         ]
     )
-    wf_client.add_promise(ork.NodePromise(ork.All(),ork.All())== 0)
+    # wf_client.add_promise(ork.NodePromise(ork.All(),ork.All())== 0)
     wf_client.commit()
+    print(f"Have workflow ids: download_dataset_id={download_dataset_id}, blastx_id={blastx_id}, blastx_output_id={blastx_output_id}, case_ids={case_ids}")
 
     # Start the workflow
     # Marker 1: Run the workflow
-    # wf_client.start()
-    # wf_client.wait()
-    # return 
+    wf_client.start()
+    wf_client.wait()
 
 
 if __name__ == "__main__":

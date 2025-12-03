@@ -38,7 +38,7 @@ class CreatePromiseEvent(BaseModel):
 
 class ConditionedTask(BaseModel):
     condition : Dict
-    task_id : str 
+    task_id : int 
     
 class CreateConditionEvent(BaseModel):
     event_type : Literal["create_condition"] = "create_condition"
