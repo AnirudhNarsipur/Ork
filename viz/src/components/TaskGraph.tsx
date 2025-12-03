@@ -194,6 +194,20 @@ export function TaskGraph({ state }: TaskGraphProps) {
 
             const isConditional = edge.condition !== undefined;
 
+            // Determine edge color based on condition resolution
+            let edgeColor = "#666"; // default for non-conditional
+            if (isConditional) {
+              const conditionNode = state.nodes.get(edge.condition!);
+              if (conditionNode?.state === "completed") {
+                // Condition is resolved - check if this edge's condition is satisfied
+                const conditionResult = Boolean(conditionNode.result);
+                const edgeSatisfied = edge.negated ? !conditionResult : conditionResult;
+                edgeColor = edgeSatisfied ? "#28a745" : "#dc3545"; // green or red
+              } else {
+                edgeColor = "#f0ad4e"; // orange - not yet resolved
+              }
+            }
+
             return (
               <g key={`edge-${idx}`}>
                 <line
@@ -201,7 +215,7 @@ export function TaskGraph({ state }: TaskGraphProps) {
                   y1={y1}
                   x2={x2}
                   y2={y2}
-                  stroke={isConditional ? "#f0ad4e" : "#666"}
+                  stroke={edgeColor}
                   strokeWidth={2}
                   strokeDasharray={isConditional ? "5,5" : undefined}
                   markerEnd="url(#arrowhead)"
@@ -211,7 +225,7 @@ export function TaskGraph({ state }: TaskGraphProps) {
                     x={(x1 + x2) / 2}
                     y={(y1 + y2) / 2 - 8}
                     fontSize={10}
-                    fill="#f0ad4e"
+                    fill={edgeColor}
                     textAnchor="middle"
                   >
                     {edge.negated ? `if not ${edge.condition}` : `if ${edge.condition}`}

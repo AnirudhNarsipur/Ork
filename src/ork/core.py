@@ -14,7 +14,7 @@ from collections import deque
 
 from pydantic import BaseModel
 
-from ork.event import ConditionedTask, CreateConditionEvent, CreateNodeEvent, CreatePromiseEvent, Event, FromEdgeModel, MarkStateTransition, MessageEvent
+from ork.event import ConditionedTask, CreateConditionEvent, CreateNodeEvent, CreatePromiseEvent, Event, FromEdgeModel, MarkStateTransition, MessageEvent, ShutdownEvent
 from .promise import EdgePromise,NodePromise,ConstrainedPromise,All,ListTaskOrTaskType,COMPOPS
 from pathlib import Path
 logger = logging.getLogger(__name__)
@@ -554,6 +554,10 @@ class Workflow:
             context.to_server.close()
             context.from_server.close()
         # Close event log file
+        self.append_event(Event(
+            timestamp=datetime.now().timestamp(),
+            event=ShutdownEvent(successful=clean)
+        ))
         self.event_log_file_handle.close()
 
     def _add_task(

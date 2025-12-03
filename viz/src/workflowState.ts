@@ -7,6 +7,7 @@ import type {
   MarkStateTransition,
   CreatePromiseEvent,
   CreateConditionEvent,
+  ShutdownEvent,
 } from "./types";
 
 export function createEmptyState(): WorkflowState {
@@ -82,6 +83,12 @@ function extractConditionInput(condition: Record<string, unknown>): { nodeId: nu
   return null;
 }
 
+function applyShutdown(state: WorkflowState, event: ShutdownEvent): void {
+  state.shutdown = {
+    successful: event.successful,
+  };
+}
+
 function applyCreateCondition(state: WorkflowState, event: CreateConditionEvent): void {
   state.conditions.push({
     caseGroups: event.case_groups,
@@ -123,6 +130,9 @@ export function applyEvent(state: WorkflowState, eventPayload: EventPayload): Wo
       break;
     case "create_condition":
       applyCreateCondition(newState, eventPayload);
+      break;
+    case "shutdown":
+      applyShutdown(newState, eventPayload);
       break;
   }
 

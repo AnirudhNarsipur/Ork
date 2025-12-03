@@ -12,7 +12,9 @@ def child1(tctx: ork.TaskContext,args):
 
 def cond_task(tctx: ork.TaskContext,args):
     print("hello from cond_task, Got args:", args)
-    return False # Marker 2: What if this is true?
+    # Marker 2: What if this is true?
+    # return True
+    return False 
 
 def child2(tctx: ork.TaskContext,args):
     wf = ork.WorkflowClient(tctx) # Create a workflow client from the task context
@@ -20,7 +22,7 @@ def child2(tctx: ork.TaskContext,args):
     if datetime.now().month == 12: # We only fire and forget in December
         wf.add_task(child_child2,depends_on=[ork.FromEdge(tctx.task_id)]) # Dynamically add a task t5 depending on t4. Will run after t4 completes
         wf.commit()
-    time.sleep(3) # Simulate some work being done
+    time.sleep(0.1) # Simulate some work being done
     return "child2"
 
 def evil_task(tctx: ork.TaskContext,args):

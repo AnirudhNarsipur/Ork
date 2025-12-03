@@ -44,11 +44,15 @@ class CreateConditionEvent(BaseModel):
     event_type : Literal["create_condition"] = "create_condition"
     case_groups : list[ConditionedTask]
 
+class ShutdownEvent(BaseModel):
+    event_type : Literal["shutdown"] = "shutdown"
+    successful : bool
+
 #TODO: Add events for state transitions 
 
 class Event(BaseModel):
     timestamp : float 
-    event : MessageEvent | CreateNodeEvent | MarkStateTransition | CreatePromiseEvent | CreateConditionEvent
+    event : MessageEvent | CreateNodeEvent | MarkStateTransition | CreatePromiseEvent | CreateConditionEvent | ShutdownEvent
 
 
     

@@ -45,12 +45,18 @@ export interface CreateConditionEvent {
   case_groups: ConditionedTask[];
 }
 
+export interface ShutdownEvent {
+  event_type: "shutdown";
+  successful: boolean;
+}
+
 export type EventPayload =
   | MessageEvent
   | CreateNodeEvent
   | MarkStateTransition
   | CreatePromiseEvent
-  | CreateConditionEvent;
+  | CreateConditionEvent
+  | ShutdownEvent;
 
 export interface Event {
   timestamp: number;
@@ -93,4 +99,7 @@ export interface WorkflowState {
   edges: GraphEdge[];
   promises: Promise[];
   conditions: Condition[];
+  shutdown?: {
+    successful: boolean;
+  };
 }

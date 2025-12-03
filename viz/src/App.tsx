@@ -202,6 +202,11 @@ function App() {
         </aside>
 
         <main className="main-panel">
+          {workflowState.shutdown && (
+            <div className={`shutdown-banner ${workflowState.shutdown.successful ? "success" : "failure"}`}>
+              Workflow {workflowState.shutdown.successful ? "completed successfully" : "failed"}
+            </div>
+          )}
           <TaskGraph state={workflowState} />
           <NavigationControls
             currentIndex={currentIndex}
