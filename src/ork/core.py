@@ -77,22 +77,22 @@ class NegCond(Cond):
 
 
 # Evaluate a condition given a model i.e a result dict 
-def evaluate_cond(cond : Cond, result_dict: dict[int,Any]) -> Optional[bool]:
+def evaluate_cond(cond : Cond, result_dict: dict[int,Any], task_graph: dict[int, OrkTask]) -> Optional[bool]:
     """ Returns None if condition cannot be evaluated yet """
     match cond:
         case CondAtom():
             if isinstance(cond.inp, bool):
                 return cond.inp
             elif isinstance(cond.inp, int):
-                if cond.inp not in result_dict:
+                if task_graph[cond.inp].status != 'completed' or cond.inp not in result_dict:
                     return None
                 res = result_dict[cond.inp]
                 err_msg = f"Expected boolean result for task {cond.inp}, got val {res} of {type(res)}"
-                assert isinstance(res, bool), err_msg
+                assert isinstance(res, bool), err_msg 
                 return res
         case AndCond():
             for arg in cond.args:
-                res = evaluate_cond(arg,result_dict)
+                res = evaluate_cond(arg,result_dict, task_graph)
                 if res is None:
                     return None
                 if not res:
@@ -100,14 +100,14 @@ def evaluate_cond(cond : Cond, result_dict: dict[int,Any]) -> Optional[bool]:
             return True
         case OrCond():
             for arg in cond.args:
-                res = evaluate_cond(arg,result_dict)
+                res = evaluate_cond(arg,result_dict, task_graph)
                 if res is None:
                     return None
                 if res:
                     return True
             return False
         case NegCond():
-            res = evaluate_cond(cond.arg,result_dict)
+            res = evaluate_cond(cond.arg,result_dict    , task_graph)
             if res is None:
                 return None
             return not res
@@ -161,6 +161,12 @@ class ConstraintChecker:
         # Store all constraints together
         self.constraints: list[ConstrainedPromise] = []
 
+        # Tick tracking for constraint scoping - constraints only apply to future additions
+        self.tick = 0
+        self.node_tick: dict[int, int] = {}  # Map from node id to tick when it was added
+        self.edge_tick: dict[tuple[int, int], int] = {}  # Map from (from_node, to_node) to tick when edge was added
+        self.constraint_tick: list[int] = []  # Tick when each constraint was added
+
     def _check_op(self, lhs: int, op: COMPOPS, rhs: int) -> bool:
         match op:
             case "==":
@@ -202,28 +208,35 @@ class ConstraintChecker:
                 raise ValueError("Invalid task list")
        
 
-    def _check_edge_constraint(self,edge_promise : EdgePromise,op : COMPOPS,n : int) -> bool:
+    def _check_edge_constraint(self,edge_promise : EdgePromise,op : COMPOPS,n : int, constraint_tick: int) -> bool:
         # For each node in from count the number of outgoing edges to to_nodes
+        # Only count edges added at or after the constraint's tick
         from_node_ids = self.get_ids_from_tasklist(edge_promise.from_nodes)
         to_node_ids = self.get_ids_from_tasklist(edge_promise.to_nodes)
-        count = 0 
+        count = 0
         to_node_id_set = set(to_node_ids)
         for from_id in from_node_ids:
-            count += len(self.current_edges[from_id].intersection(to_node_id_set))
+            for to_id in self.current_edges[from_id].intersection(to_node_id_set):
+                edge_added_tick = self.edge_tick.get((from_id, to_id), 0)
+                if edge_added_tick >= constraint_tick:
+                    count += 1
         return self._check_op(count,op,n)
 
 
     
     
-    def _check_node_constraint(self,node_promise : NodePromise,op : COMPOPS,n : int) -> bool:
+    def _check_node_constraint(self,node_promise : NodePromise,op : COMPOPS,n : int, constraint_tick: int) -> bool:
         # For each node in from count the number of spawned nodes in to_nodes
-    
+        # Only count nodes added at or after the constraint's tick
         from_node_ids = self.get_ids_from_tasklist(node_promise.from_nodes)
         to_node_ids = self.get_ids_from_tasklist(node_promise.to_nodes) # type: ignore[arg-type]
-        count = 0 
+        count = 0
         to_node_id_set = set(to_node_ids)
         for from_id in from_node_ids:
-            count += len(self.spawn_map[from_id].intersection(to_node_id_set))
+            for spawned_id in self.spawn_map[from_id].intersection(to_node_id_set):
+                node_added_tick = self.node_tick.get(spawned_id, 0)
+                if node_added_tick >= constraint_tick:
+                    count += 1
         return self._check_op(count,op,n)
         
 
@@ -231,12 +244,13 @@ class ConstraintChecker:
         self, constraint_indexes : Sequence[int]) -> bool:
         for idx in constraint_indexes:
                 constraint = self.constraints[idx]
+                c_tick = self.constraint_tick[idx]
                 match  constraint.promise:
                     case EdgePromise():
-                        if not self._check_edge_constraint(constraint.promise, constraint.op, constraint.n):
+                        if not self._check_edge_constraint(constraint.promise, constraint.op, constraint.n, c_tick):
                             return False
                     case NodePromise():
-                        if not self._check_node_constraint(constraint.promise, constraint.op, constraint.n):
+                        if not self._check_node_constraint(constraint.promise, constraint.op, constraint.n, c_tick):
                             return False
         return True
     
@@ -263,6 +277,7 @@ class ConstraintChecker:
     def add_deps(
         self,spawn_task : Optional[TypedTask], n1: TypedTask, n2: list[TypedTask]
     ) -> bool:  # False if dependency causes a violation
+        current_tick = self.tick
         applicable_constraints = []
         if spawn_task is not None:
             self.spawn_map[spawn_task.task_id].add(n1.task_id)
@@ -270,15 +285,19 @@ class ConstraintChecker:
         else:
             self.spawn_map[ROOT_TASK_ID].add(n1.task_id) # Is a root task
         self.id_to_name[n1.task_id] = n1.name
+        self.node_tick[n1.task_id] = current_tick  # Record tick when node was added
         applicable_constraints.extend(self._task_relevant_constraints(n1.task_id))
         for n2_task in n2:
             self.id_to_name[n2_task.task_id] = n2_task.name
             self.current_edges[n2_task.task_id].add(n1.task_id)
+            self.edge_tick[(n2_task.task_id, n1.task_id)] = current_tick  # Record tick when edge was added
             applicable_constraints.extend(self._task_relevant_constraints(n2_task.task_id))
         # Check all applicable constraints
         return self._check_constraint(applicable_constraints)
 
     def add_constraint(self, constraint: ConstrainedPromise) -> bool:
+        self.tick += 1  # Increment tick before adding constraint
+        self.constraint_tick.append(self.tick)  # Record tick when constraint was added
         self.constraints.append(constraint)
         return self._check_constraint([len(self.constraints) - 1])
         
@@ -442,10 +461,9 @@ class Workflow:
         # For each conditioned task check if its condition can be evaluated now
         new_case_groups = [] # Recreate without empty/fully evaluated groups
         for case_group in self.cases:
-            evaluated = False 
             while case_group:
                 branch_cond, task_id = case_group[0]
-                cond_result = evaluate_cond(branch_cond,self.result_dict) #type: ignore[arg-type]
+                cond_result = evaluate_cond(branch_cond,self.result_dict,self.task_graph) #type: ignore[arg-type]
                 if cond_result is None: # Can't evaluate yet
                     break 
                 if not cond_result: # Condition is false, mark this as failed and remove from list
@@ -453,9 +471,13 @@ class Workflow:
                     case_group.popleft()
                 else: # Condition is true, mark this as pending and remove from list
                     self.transition_state(task_id,"pending")
-                    evaluated = True 
+                    # Mark all remaining cases as failed
+                    case_group.popleft() # Remove this case
+                    for _, remaining_task_id in case_group:
+                        self.transition_state(remaining_task_id,"failed",error_msg="A previous condition in the case group evaluated to true")
+                 
                     break
-            if case_group and not evaluated:
+            if case_group:
                 new_case_groups.append(case_group)
         self.cases = new_case_groups
 

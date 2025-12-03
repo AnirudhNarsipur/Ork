@@ -128,17 +128,32 @@ function calculateLayout(
 }
 
 export function TaskGraph({ state }: TaskGraphProps) {
-  const { positions, svgWidth, svgHeight } = useMemo(() => {
+  const { positions, viewBox } = useMemo(() => {
     const pos = calculateLayout(state.nodes, state.edges);
-    let maxX = 400;
-    let maxY = 300;
+    let minX = PADDING;
+    let minY = PADDING;
+    let maxX = PADDING + NODE_WIDTH;
+    let maxY = PADDING + NODE_HEIGHT;
 
     for (const p of pos.values()) {
-      maxX = Math.max(maxX, p.x + NODE_WIDTH + PADDING);
-      maxY = Math.max(maxY, p.y + NODE_HEIGHT + PADDING);
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + NODE_WIDTH);
+      maxY = Math.max(maxY, p.y + NODE_HEIGHT);
     }
 
-    return { positions: pos, svgWidth: maxX, svgHeight: maxY };
+    // Add padding around the content
+    const padded = {
+      x: minX - PADDING,
+      y: minY - PADDING,
+      width: maxX - minX + PADDING * 2,
+      height: maxY - minY + PADDING * 2,
+    };
+
+    return {
+      positions: pos,
+      viewBox: `${padded.x} ${padded.y} ${padded.width} ${padded.height}`
+    };
   }, [state.nodes, state.edges]);
 
   const committedNodes = Array.from(state.nodes.values()).filter(n => n.committed);
@@ -152,7 +167,7 @@ export function TaskGraph({ state }: TaskGraphProps) {
       {committedNodes.length === 0 ? (
         <div className="empty-graph">No committed tasks yet</div>
       ) : (
-        <svg width={svgWidth} height={svgHeight}>
+        <svg viewBox={viewBox} preserveAspectRatio="xMidYMid meet">
           <defs>
             <marker
               id="arrowhead"
@@ -199,7 +214,7 @@ export function TaskGraph({ state }: TaskGraphProps) {
                     fill="#f0ad4e"
                     textAnchor="middle"
                   >
-                    if {edge.condition}
+                    {edge.negated ? `if not ${edge.condition}` : `if ${edge.condition}`}
                   </text>
                 )}
               </g>

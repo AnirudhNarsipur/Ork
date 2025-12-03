@@ -51,11 +51,8 @@ function applyStateTransition(state: WorkflowState, event: MarkStateTransition):
     node.state = event.new_state;
     node.result = event.result ?? undefined;
     node.errorMsg = event.error_msg ?? undefined;
-    // Mark as committed when it transitions to pending or later
-    // (conditioned is a valid transition state, so we only keep uncommitted if still conditioned)
-    if (event.new_state !== "conditioned") {
-      node.committed = true;
-    }
+    // Mark as committed on any state transition (including conditioned)
+    node.committed = true;
   }
 }
 
@@ -69,10 +66,43 @@ function applyCreatePromise(state: WorkflowState, event: CreatePromiseEvent): vo
   });
 }
 
+// Extract the input node ID and negation status from a condition object
+function extractConditionInput(condition: Record<string, unknown>): { nodeId: number; negated: boolean } | null {
+  // Direct input: {"inp": 3}
+  if (typeof condition.inp === "number") {
+    return { nodeId: condition.inp, negated: false };
+  }
+  // Negated condition: {"arg": {"inp": 3}}
+  if (condition.arg && typeof condition.arg === "object") {
+    const inner = extractConditionInput(condition.arg as Record<string, unknown>);
+    if (inner) {
+      return { nodeId: inner.nodeId, negated: !inner.negated };
+    }
+  }
+  return null;
+}
+
 function applyCreateCondition(state: WorkflowState, event: CreateConditionEvent): void {
   state.conditions.push({
     caseGroups: event.case_groups,
   });
+
+  // Create edges from condition input to conditioned tasks
+  for (const caseGroup of event.case_groups) {
+    const condInfo = extractConditionInput(caseGroup.condition);
+    const taskId = parseInt(caseGroup.task_id as unknown as string, 10) || caseGroup.task_id;
+
+    if (condInfo !== null && typeof taskId === "number") {
+      // Add edge from the condition input node to the conditioned task
+      // Mark it as a conditional edge
+      state.edges.push({
+        from: condInfo.nodeId,
+        to: taskId as number,
+        condition: condInfo.nodeId, // The condition source
+        negated: condInfo.negated,
+      });
+    }
+  }
 }
 
 export function applyEvent(state: WorkflowState, eventPayload: EventPayload): WorkflowState {

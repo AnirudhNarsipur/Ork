@@ -91,9 +91,10 @@ def secret_task(tctx: ork.TaskContext,args):
 def is_batchx_success(stctx: ork.TaskContext,args):
     print("Generated Blastx output successfully!")
     # Marker 2: Spawn a secret task dynamically
-    # wf = ork.WorkflowClient(stctx)
-    # wf.add_task(secret_task)
-    # wf.commit()
+    wf = ork.WorkflowClient(stctx)
+    wf.add_task(secret_task)
+    wf.commit()
+    print("Spawned secret task dynamically!")
     return True
 
 def is_batchx_failure(stctx: ork.TaskContext,args):
@@ -111,7 +112,7 @@ def declare_blast_wf():
             (ork.NegCond(ork.CondAtom(blastx_output_id)), is_batchx_failure,None),
         ]
     )
-    # wf_client.add_promise(ork.NodePromise(ork.All(),ork.All())== 0)
+    wf_client.add_promise(ork.NodePromise(ork.All(),ork.All())== 0)
     wf_client.commit()
     print(f"Have workflow ids: download_dataset_id={download_dataset_id}, blastx_id={blastx_id}, blastx_output_id={blastx_output_id}, case_ids={case_ids}")
 

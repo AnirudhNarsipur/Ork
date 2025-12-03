@@ -73,6 +73,7 @@ export interface GraphEdge {
   from: number;
   to: number;
   condition?: number; // node id that acts as condition
+  negated?: boolean; // true if this is a negated condition (if NOT)
 }
 
 export interface Promise {
