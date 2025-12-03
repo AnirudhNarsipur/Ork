@@ -1,7 +1,8 @@
 import time
-import ork 
+import ork
 from datetime import datetime
 import os 
+
 CWD = os.getcwd()
 def t1(tctx: ork.TaskContext):
     time.sleep(0.5) # Simulate some work being done
@@ -50,3 +51,6 @@ def root_task(tctx: ork.TaskContext):
 def main():
     wf = ork.run(root_task)
     wf.wait()
+
+if __name__ == "__main__":
+    main()

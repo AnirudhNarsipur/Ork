@@ -1,7 +1,6 @@
 import logging
 import sys
-from ork import Workflow
-import demo_tasks
+import workflows.demo_tasks as demo_tasks
 
 def setup_logger():
     logger = logging.getLogger()

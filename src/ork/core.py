@@ -9,58 +9,13 @@ import logging
 from queue import Empty
 from abc import ABC
 from enum import Enum
-from typing import Final
 import uuid
+from pydantic import BaseModel
+from .promise import EdgePromise,NodePromise,ConstrainedPromise,All,ListTaskOrTaskType,ListTaskType,COMPOPS
 
 logger = logging.getLogger(__name__)
 
 
-ListTaskOrTaskType = list[Callable | int]
-ListTaskType = list[Callable]
-class All:
-      __slots__ = ()
-      def __repr__(self): return "ALL"
-
-class Promise(ABC):
-    pass
-COMPOPS = Literal["==","<=","<",">=",">"]
-class ConstraintOpsMixin:
-      def _constraint(self, op: COMPOPS, value: int) -> ConstrainedPromise:
-          if not isinstance(value, int):
-              raise TypeError("Only integers are allowed for constraints")
-          return ConstrainedPromise(self, op, value) # type: ignore[arg-type]
-
-      def __eq__(self, value: object) -> ConstrainedPromise:  # type: ignore[override]
-          return self._constraint("==", value)  # type: ignore[arg-type]
-
-      def __le__(self, value: int) -> ConstrainedPromise:
-          return self._constraint("<=", value)
-
-      def __lt__(self, value: int) -> ConstrainedPromise:
-          return self._constraint("<", value)
-
-      def __ge__(self, value: int) -> ConstrainedPromise:
-          return self._constraint(">=", value)
-
-      def __gt__(self, value: int) -> ConstrainedPromise:
-          return self._constraint(">", value)
-class EdgePromise(ConstraintOpsMixin,Promise):
-    def __init__(self, from_nodes: ListTaskOrTaskType | All, to_nodes: ListTaskOrTaskType | All):
-        self.from_nodes = from_nodes
-        self.to_nodes = to_nodes
-
-class NodePromise(ConstraintOpsMixin,Promise):
-    # To node must be list task type as we don't know any ids yet
-    def __init__(self,from_nodes : ListTaskOrTaskType | All,to_nodes : ListTaskType | All) -> None:
-        super().__init__()
-        self.from_nodes = from_nodes
-        self.to_nodes = to_nodes
-
-@dataclass(eq=True, frozen=True)
-class ConstrainedPromise:
-    promise : EdgePromise | NodePromise
-    op : Literal["==","<=","<",">=",">"]
-    n : int 
 
  
 
@@ -172,7 +127,14 @@ class ConstraintChecker:
     def get_ids_from_tasklist(self,task_list : ListTaskOrTaskType | All) -> list[int]:
         match task_list:
             case All():
-                return list(set(list(self.current_edges.keys()) + list(self.spawn_map.keys())))
+                # TODO: just maintain a list of all task ids to avoid this
+                st : set[int] = set()
+                for k,v in self.spawn_map.items():
+                    st.add(k)
+                    st.update(v)
+                return list(st)
+
+                    
             case list(tl):
                 res = []
                 for task in tl:
@@ -271,6 +233,24 @@ class ExecStatus(Enum):
     SHUTDOWN = 2
     CLEAN_EXIT = 3
 
+def serialize_arg(arg):
+    if isinstance(arg, Callable):
+        return arg.__qualname__
+    elif isinstance(arg, FromEdge):
+        return {"from_node": arg.from_node, "cond": arg.cond}
+    elif isinstance(arg, ConstrainedPromise):
+        return {
+            "promise": serialize_arg(arg.promise),
+            "op": arg.op,
+            "n": arg.n,
+        }
+    elif isinstance(arg, EdgePromise) or isinstance(arg, NodePromise):
+        return {
+            "from_nodes": [i if isinstance(i, int) else i.__qualname__ for i in (arg.from_nodes if isinstance(arg.from_nodes, list) else [])] if not isinstance(arg.from_nodes, All) else "ALL",
+            "to_nodes": [i if isinstance(i, int) else i.__qualname__ for i in (arg.to_nodes if isinstance(arg.to_nodes, list) else [])] if not isinstance(arg.to_nodes, All) else "ALL",
+        }
+    else:
+        return str(arg)
 
 class Workflow:
     """
@@ -279,7 +259,7 @@ class Workflow:
 
     def __init__(self):
         # Task Node Objects
-        self.workflow_id : str = str(uuid.uuid7())
+        self.workflow_id : str = uuid.uuid7().hex
         self.manager = Manager()
         self.result_dict = self.manager.dict()
         self.task_graph: dict[int, OrkTask] = {}
@@ -475,8 +455,9 @@ class Workflow:
 
                 msg_action, args = msg
                 self.event_log_file_handle.write(json.dumps({
-                    "type" : msg_action,
-                    "args" : [str(a) for a in args]
+                    "type" : "message",
+                    "action" : msg_action,
+                    "args" : [serialize_arg(a) for a in args]
                 }) + "\n")
                 self.event_log_file_handle.flush() # Flush to display immediately
                 match msg_action:
