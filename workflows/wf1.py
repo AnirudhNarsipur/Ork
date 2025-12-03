@@ -10,6 +10,7 @@ import requests
 # Adapted from https://www.union.ai/docs/v1/flyte/tutorials/bioinformatics/blast/blastx-example/
 WF1_DIR = os.path.join(str(Path(__file__).parent.parent.absolute()), "wf_data", "wf1")
 def download_dataset(tctx: ork.TaskContext,args):
+    print("Beginning dataset download...")
     input_dir_path = (Path(WF1_DIR) / "kitasatospora")
     input_dir_path.mkdir(exist_ok=True)
     r = requests.get("https://api.github.com/repos/flyteorg/flytesnacks/contents/blast/kitasatospora?ref=datasets")
@@ -19,9 +20,11 @@ def download_dataset(tctx: ork.TaskContext,args):
         if not file_path.exists():
             r_file = requests.get(each_file["download_url"])
             open(str(file_path), "wb").write(r_file.content)
+    print("Dataset download complete.")
     return input_dir_path
 
 def run_blastx(tctx: ork.TaskContext,args):
+    print("Starting BLASTX...")
     datadir : str = args[0]
     query: str = "k_sp_CB01950_penicillin.fasta"
     db: str = "kitasatospora_proteins.faa"
@@ -55,6 +58,7 @@ def run_blastx(tctx: ork.TaskContext,args):
 
 
 def blastx_output(tctx: ork.TaskContext,args):
+    print("Processing BLASTX output...")
     # read BLASTX output
     blastout_path = args[0][1]
     result = pd.read_csv(blastout_path, sep="\t", header=None)
@@ -83,6 +87,9 @@ def blastx_output(tctx: ork.TaskContext,args):
     plt.title("E value vs %identity")
     plot_path = Path(blastout_path).parent /  "plot.png"
     plt.savefig(str(plot_path))
+    print(f"Saved BLASTX plot to {plot_path}")
+    # Marker 4: Return false to take a different branch
+    # return False
     return True 
 
 def secret_task(tctx: ork.TaskContext,args):
@@ -91,10 +98,10 @@ def secret_task(tctx: ork.TaskContext,args):
 def is_batchx_success(stctx: ork.TaskContext,args):
     print("Generated Blastx output successfully!")
     # Marker 2: Spawn a secret task dynamically
-    wf = ork.WorkflowClient(stctx)
-    wf.add_task(secret_task)
-    wf.commit()
-    print("Spawned secret task dynamically!")
+    # wf = ork.WorkflowClient(stctx)
+    # wf.add_task(secret_task)
+    # wf.commit()
+    # print("Spawned secret task dynamically!")
     return True
 
 def is_batchx_failure(stctx: ork.TaskContext,args):
@@ -112,14 +119,15 @@ def declare_blast_wf():
             (ork.NegCond(ork.CondAtom(blastx_output_id)), is_batchx_failure,None),
         ]
     )
-    wf_client.add_promise(ork.NodePromise(ork.All(),ork.All())== 0)
+    # Marker 3: Add a promise that no further tasks can be created after this point
+    # wf_client.add_promise(ork.NodePromise(ork.All(),ork.All())== 0)
     wf_client.commit()
     print(f"Have workflow ids: download_dataset_id={download_dataset_id}, blastx_id={blastx_id}, blastx_output_id={blastx_output_id}, case_ids={case_ids}")
 
     # Start the workflow
     # Marker 1: Run the workflow
-    wf_client.start()
-    wf_client.wait()
+    # wf_client.start()
+    # wf_client.wait()
 
 
 if __name__ == "__main__":
