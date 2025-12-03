@@ -41,6 +41,7 @@ class OrkTask:
     task_context_id: Optional[int] = None  # Set when task is running
     task_process: Optional[Process] = None  # Set when task is running
     conditioned : bool = False # Whether the task is part of a conditional case
+    manual_args : Optional[tuple] = None # Optional manual args to pass to the function
 
 
 @dataclass()
@@ -399,6 +400,8 @@ class Workflow:
         task_obj.task_context_id = len(self.contexts) - 1
         # Setup process
         args_dict = {}
+        if task_obj.manual_args is not None:
+            args_dict["manual_args"] = task_obj.manual_args
         for idx,dep_edge in enumerate(task_obj.depends_on):
             # If the edge has a condition and the condition is false we skip setting the arg
             if (cond_task_id := dep_edge.cond) is not None and not self.result_dict[cond_task_id]:
@@ -565,6 +568,7 @@ class Workflow:
         func: Callable,
         depends_on: Optional[list[FromEdge]] = None,
         spawn_id: Optional[int] = None,
+        manual_args: Optional[tuple] = None,
     ) -> int:
         if depends_on is None:
             depends_on = []
@@ -581,13 +585,19 @@ class Workflow:
             )
             for dep in depends_on
         ]
-        if not self.constraint_checker.add_deps(None,
+        spawned_typed_task = None
+        if spawn_id is not None:
+            spawned_typed_task = TypedTask(
+                self.task_graph[spawn_id].task_func.__qualname__, spawn_id
+            )
+
+        if not self.constraint_checker.add_deps(spawned_typed_task,
             TypedTask(func.__qualname__, self.next_node_number), typed_deps
         ):
             print("ERROR: Dependency addition violated constraints. Shutting down")
             return -1  # Dependency addition failed due to constraint violation
         task_obj = OrkTask(
-            self.next_node_number, func, "creating", depends_on, parent_id=spawn_id
+            self.next_node_number, func, "creating", depends_on, parent_id=spawn_id, manual_args=manual_args
         )
         self.task_graph[self.next_node_number] = task_obj
   
@@ -652,8 +662,8 @@ class Workflow:
                 self.append_event(message_event)
                 match msg_action:
                     case "add_task":
-                        func, depends_on, spawn_id = args
-                        res_task_id = self._add_task(func, depends_on, spawn_id)
+                        func, depends_on, spawn_id, manual_args = args
+                        res_task_id = self._add_task(func, depends_on, spawn_id,manual_args)
                         if res_task_id == -1:
                             return False
                         # TODO: This could block but assume that the queue always has space
@@ -732,13 +742,14 @@ class WorkflowClient:
         return self.task_context.from_server.get()
 
     def add_task(
-        self, func: Callable, depends_on: Optional[list[FromEdge]] = None
+        self, func: Callable, depends_on: Optional[list[FromEdge]] = None, args: Optional[tuple] = None
     ) -> int:
         """
         Args:
             func: The function to run as a task
             depends_on: A list of FromEdge objects representing dependencies. If a dependency has a conditional task associated with it, the edge will only be considered if the conditional task returns True.
         A task is "created" but not schedelued until commit() is called by the client.
+            args : Optional tuple of arguments to pass to the function, will be available as "manual_args" in the function args_dict
         Returns:
             The task id of the created task
         """
@@ -746,7 +757,7 @@ class WorkflowClient:
         if isinstance(self.task_context, TaskContext):
             spawn_id = self.task_context.task_id
         self.send_message(
-            ("add_task", (func, depends_on if depends_on else None, spawn_id))
+            ("add_task", (func, depends_on if depends_on else None, spawn_id,args))
         )
         res_task_id = self.recv_message()
         self.to_commit.append(res_task_id)
